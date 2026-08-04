@@ -29,7 +29,19 @@ resolved=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config path 2>
 echo "  OK omp state dir resolves onto the host mount (${resolved})"
 
 # --- a container write reaches the host -------------------------------------
-probe=".omp-smoke-$$"
+# This is the one assertion that writes into the caller's real state dir, so the
+# probe is removed from a trap rather than inline: cleanup on the success path
+# alone leaks the file whenever the script is interrupted between creating it
+# and removing it (a failing later assertion, Ctrl-C, or a CI timeout).
+# INT/TERM as well as EXIT, since bash does not run the EXIT trap on a signal
+# unless the signal itself is trapped.
+_PROBE_PREFIX=".omp-smoke-"
+probe="${_PROBE_PREFIX}$$"
+# Sweep anything a previous run left behind — only SIGKILL can get past the trap,
+# but when it does the file would otherwise sit in the user's home forever.
+rm -f "${_PI_STATE_HOST}/${_PROBE_PREFIX}"* 2>/dev/null || true
+trap 'rm -f "${_PI_STATE_HOST}/${probe}" 2>/dev/null || true' EXIT INT TERM
+
 "${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" \
   bash -c "touch '${_PI_STATE_TARGET}/${probe}'"
 if [ -e "${_PI_STATE_HOST}/${probe}" ]; then
