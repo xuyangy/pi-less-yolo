@@ -1,27 +1,51 @@
-# Builds DOCKER_FLAGS for pi container tasks. Source this file; do not execute directly.
+# Builds DOCKER_FLAGS for the agent container tasks. Source this file; do not
+# execute directly.
 # Usage: source "$(dirname "$0")/_docker_flags"
+#
+# Serves both agents. Set _PI_VARIANT=omp before sourcing to target the oh-my-pi
+# image; unset or "pi" keeps the original behaviour byte for byte. Everything
+# below the variant block — hardening flags, mounts, key forwarding, the
+# PI_EXTRA_MOUNTS guards — is shared, so the two agents cannot drift apart on
+# the security-relevant flags.
+case "${_PI_VARIANT:-pi}" in
+  pi)
+    PI_IMAGE="pi-less-yolo:latest"
+    _PI_BUILD_TASK="pi:build"
+    _PI_STATE_HOST="${HOME}/.pi/agent"
+    _PI_STATE_TARGET="/pi-agent"
+    # PI_CODING_AGENT_DIR points pi at the mount instead of deriving it from
+    # $HOME, sidestepping HOME-resolution issues inside the container.
+    _PI_STATE_ENV="PI_CODING_AGENT_DIR=${_PI_STATE_TARGET}"
+    _PI_HOME_TARGET="/home/piuser"
+    ;;
+  omp)
+    PI_IMAGE="omp-less-yolo:latest"
+    _PI_BUILD_TASK="omp:build"
+    _PI_HOME_TARGET="/home/ompuser"
+    # No PI_CONFIG_DIR here, deliberately. Unlike pi's PI_CODING_AGENT_DIR it is
+    # NOT an absolute path — omp joins it under $HOME, so PI_CONFIG_DIR=/omp-home
+    # resolves to /home/ompuser/omp-home/agent and silently misses the mount
+    # (confirmed with `omp config path`). Mounting at omp's own default location
+    # under the image's fixed HOME is simpler and cannot drift.
+    _PI_STATE_HOST="${HOME}/.omp"
+    _PI_STATE_TARGET="${_PI_HOME_TARGET}/.omp"
+    _PI_STATE_ENV=""
+    ;;
+  *)
+    echo "error: unknown _PI_VARIANT '${_PI_VARIANT}' (expected 'pi' or 'omp')" >&2
+    exit 1
+    ;;
+esac
 
-PI_IMAGE="pi-less-yolo:latest"
+# Sets DOCKER_CMD. BASH_SOURCE, not $0: this file is sourced, so $0 is the caller.
+# shellcheck source=tasks/pi/_runtime
+source "$(dirname "${BASH_SOURCE[0]}")/_runtime"
 
-# PI_CONTAINER_RUNTIME overrides; otherwise detect podman via version output or binary path.
-# || true: some docker-as-podman shims exit non-zero, which would abort under pipefail.
-# readlink: when podman is symlinked as "docker", it reports "docker version X" not "podman version X".
-if [[ -n "${PI_CONTAINER_RUNTIME:-}" ]]; then
-  DOCKER_CMD="${PI_CONTAINER_RUNTIME}"
-else
-  DOCKER_CMD="docker"
-  detected_version=$(docker --version 2>&1 || true)
-  docker_realpath=$(readlink -f "$(command -v docker || true)" 2>/dev/null || true)
-  if [[ "${detected_version}" == *podman* ]] || [[ "${docker_realpath}" == *podman* ]]; then
-    DOCKER_CMD="podman"
-  fi
-fi
-
-"${DOCKER_CMD}" image inspect "${PI_IMAGE}" > /dev/null 2>&1 || mise run pi:build
+"${DOCKER_CMD}" image inspect "${PI_IMAGE}" > /dev/null 2>&1 || mise run "${_PI_BUILD_TASK}"
 
 # Pre-create so Docker doesn't auto-create it as root (breaking writes by the
 # container's non-root UID).
-mkdir -p "${HOME}/.pi/agent"
+mkdir -p "${_PI_STATE_HOST}"
 
 # The whole containment story is "the agent only sees $(pwd)". That holds only
 # if $(pwd) is actually a project directory: running from $HOME or / mounts your
@@ -47,24 +71,28 @@ unset _pi_cwd _pi_home
 #
 # Mounts:
 #   $(pwd):$(pwd)              current directory, mounted at its real host path.
-#   ~/.pi/agent:/pi-agent      pi config, credentials, sessions, and managed
-#                               binaries from the host. PI_CODING_AGENT_DIR
-#                               tells pi to use this path instead of deriving
-#                               it from $HOME, sidestepping any HOME-resolution
-#                               issues inside the container.
+#   <state>:<target>           agent config, credentials, sessions, and managed
+#                               binaries from the host. The accompanying env var
+#                               points the agent at the mount rather than
+#                               deriving it from $HOME, sidestepping any
+#                               HOME-resolution issues inside the container.
+#                               See the variant block at the top for per-agent
+#                               paths.
 DOCKER_FLAGS=(
   "--rm"
   "--user" "$(id -u):$(id -g)"
   "--cap-drop=ALL"
   "--security-opt=no-new-privileges"
   "--ipc=none"
-  "--volume" "$(pwd):$(pwd)${_PI_WORKDIR_RO:+:ro}"  # :ro set by pi:readonly
-  "--volume" "${HOME}/.pi/agent:/pi-agent"
+  "--volume" "$(pwd):$(pwd)${_PI_WORKDIR_RO:+:ro}"  # :ro set by the readonly task
+  "--volume" "${_PI_STATE_HOST}:${_PI_STATE_TARGET}"
   "--workdir" "$(pwd)"
-  "--env" "PI_CODING_AGENT_DIR=/pi-agent"
   "--env" "TERM=${TERM:-xterm-256color}"
   "--env" "COLORTERM=${COLORTERM:-truecolor}"
 )
+
+# Only pi needs an explicit state-dir env var; see the variant block.
+[[ -n "${_PI_STATE_ENV}" ]] && DOCKER_FLAGS+=("--env" "${_PI_STATE_ENV}")
 
 # Podman-specific: use --userns=keep-id to properly map the user namespace
 # and avoid "crun: chown `/dev/pts/0`: Invalid argument" errors.
@@ -96,6 +124,25 @@ PI_ENV_VARS=(
   MINIMAX_API_KEY
   MINIMAX_CN_API_KEY
 )
+
+# omp resolves a wider provider set than pi (docs/environment-variables.md).
+# Appended only for the omp variant so pi's forwarded surface is unchanged;
+# names that are unset on the host are skipped by the loop below either way.
+if [[ "${_PI_VARIANT:-pi}" == "omp" ]]; then
+  PI_ENV_VARS+=(
+    ANTHROPIC_OAUTH_TOKEN
+    ANTHROPIC_FOUNDRY_API_KEY
+    GOOGLE_API_KEY
+    FIREWORKS_API_KEY
+    TOGETHER_API_KEY
+    HUGGINGFACE_HUB_TOKEN
+    HF_TOKEN
+    NVIDIA_API_KEY
+    LITELLM_API_KEY
+    OMP_PROFILE
+  )
+fi
+
 # Pass the NAME only, not name=value. Both docker and podman then read the value
 # from their own environment, so API keys never appear in the `docker run` argv —
 # where any local user could read them out of `ps aux`, and where they would be
@@ -108,7 +155,7 @@ done
 # Git identity: mount ~/.gitconfig read-only. Opt out with PI_NO_GITCONFIG=1.
 # Credential helpers (e.g. osxkeychain) are unavailable; git falls back to prompting.
 if [[ -z "${PI_NO_GITCONFIG:-}" && -f "${HOME}/.gitconfig" ]]; then
-  DOCKER_FLAGS+=("--volume" "${HOME}/.gitconfig:/home/piuser/.gitconfig:ro")
+  DOCKER_FLAGS+=("--volume" "${HOME}/.gitconfig:${_PI_HOME_TARGET}/.gitconfig:ro")
 fi
 
 # Resource limits. Opt in by setting any of PI_MEMORY, PI_CPUS, or PI_PIDS_LIMIT.
@@ -219,10 +266,10 @@ fi
 # `ssh-add -l` before enabling.
 if [[ -n "${PI_SSH_AGENT:-}" ]]; then
   if [[ -f "${HOME}/.ssh/known_hosts" ]]; then
-    DOCKER_FLAGS+=("--volume" "${HOME}/.ssh/known_hosts:/home/piuser/.ssh/known_hosts:ro")
+    DOCKER_FLAGS+=("--volume" "${HOME}/.ssh/known_hosts:${_PI_HOME_TARGET}/.ssh/known_hosts:ro")
   fi
   if [[ -f "${HOME}/.ssh/config" ]]; then
-    DOCKER_FLAGS+=("--volume" "${HOME}/.ssh/config:/home/piuser/.ssh/config:ro")
+    DOCKER_FLAGS+=("--volume" "${HOME}/.ssh/config:${_PI_HOME_TARGET}/.ssh/config:ro")
   fi
 
   if [[ "$(uname -s)" == "Darwin" ]] && [[ "${DOCKER_CMD}" == "docker" ]]; then

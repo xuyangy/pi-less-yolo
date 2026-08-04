@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1
+
+# oh-my-pi (omp) variant of the pi-less-yolo sandbox. Same runtime hardening as
+# the pi image — the run flags come from the shared tasks/pi/_docker_flags — but
+# omp ships as prebuilt npm packages on Bun rather than Node, so the build is a
+# single stage: no Rust toolchain and no native compilation (upstream's own
+# Dockerfile builds pi_natives from source; @oh-my-pi/pi-natives is that addon,
+# already built).
+FROM oven/bun:1.3.14-slim@sha256:d56a2534ffd262e92c12fd3249d3924d296d97086da773f821d7d0477435ea04
+
+USER root
+
+# ripgrep + fd: omp's search tools shell out to these.
+# python3: omp runs a persistent Python kernel for its code-execution tool.
+# openssh-client: git-over-SSH (PI_SSH_AGENT=1).
+# tini: PID 1 reaping for the long-lived TUI, which spawns subprocesses.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        fd-find \
+        git \
+        openssh-client \
+        python3 \
+        python3-venv \
+        ripgrep \
+        tini \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+# BUN_INSTALL before the global install so packages land in a world-readable
+# path. Bun's default (~/.bun) would put them under root's home, unreadable by
+# the non-root runtime UID.
+ENV BUN_INSTALL=/usr/local/bun
+ENV PATH="/usr/local/bun/bin:${PATH}"
+
+# Pinned, like pi in the sibling Dockerfile. Renovate tracks both.
+# @oh-my-pi/pi-natives is the prebuilt Rust addon; it must match the agent version.
+RUN bun install -g \
+        @oh-my-pi/pi-coding-agent@17.2.7 \
+        @oh-my-pi/pi-natives@17.2.7 \
+    && chmod -R a+rX /usr/local/bun
+
+# Approval-mode floor. omp defaults to `yolo`, which auto-approves the `exec`
+# tier — shelling out, driving a browser, spawning subagents — with no prompt.
+# This overlay lowers that to `write`: read and write are still automatic, exec
+# prompts.
+#
+# Delivered as a PI_CONFIG_FILES overlay rather than written into the mounted
+# state dir, so it applies without mutating the user's own config.yml. A session
+# can still opt out explicitly with `omp --yolo`.
+RUN mkdir -p /etc/omp \
+    && printf '%s\n' \
+        '# Managed by pi-less-yolo. Overlay applied via PI_CONFIG_FILES.' \
+        'tools:' \
+        '  approvalMode: write' \
+        > /etc/omp/hardened.yml \
+    && chmod 0444 /etc/omp/hardened.yml
+ENV PI_CONFIG_FILES=/etc/omp/hardened.yml
+
+# Same layout rationale as the pi image: world-writable $HOME so any runtime UID
+# can write, root-owned .ssh that a non-matching UID can still read into, and a
+# world-writable /etc/passwd so the entrypoint can register the runtime UID
+# (SSH's getpwuid(3) hard-fails without one). Safe because the run tasks pass
+# --cap-drop=ALL and --no-new-privileges, and the image defaults to non-root.
+RUN mkdir -p /home/ompuser /home/ompuser/.ssh \
+    && chmod 1777 /home/ompuser \
+    && chmod 755 /home/ompuser/.ssh \
+    && chmod a+w /etc/passwd \
+    && touch /home/ompuser/.ssh/known_hosts \
+    && chmod 666 /home/ompuser/.ssh/known_hosts
+
+ENV HOME=/home/ompuser
+
+# The Bun base image sets WORKDIR /home/bun/app, owned by uid 1000 and not
+# traversable by the runtime UID. omp probes <cwd>/.omp for project config, so
+# inheriting that directory makes a bare `docker run` fail with EACCES. The run
+# tasks always pass --workdir "$(pwd)"; this only fixes the default.
+WORKDIR /home/ompuser
+
+# Shared with the pi image; PI_ENTRY_CMD selects which agent it execs.
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+ENV PI_ENTRY_CMD=omp
+
+# Fail closed to a non-root UID: the run tasks always pass --user, so this only
+# governs a bare `docker run`, where the alternative would be root.
+USER 65532:65532
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

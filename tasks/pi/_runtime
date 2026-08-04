@@ -1,0 +1,22 @@
+# Resolves DOCKER_CMD to the container runtime in use. Source this file; do not
+# execute directly.
+#
+# Kept separate from _docker_flags so that consumers which need the *name* of the
+# runtime — to branch on it, or to report it — share one implementation. Scripts
+# that merely invoke the runtime do not need this: when podman is installed as a
+# `docker` shim, plain `docker build` already runs podman.
+#
+# PI_CONTAINER_RUNTIME overrides; otherwise detect podman via version output or binary path.
+# || true: some docker-as-podman shims exit non-zero, which would abort under pipefail.
+# readlink: when podman is symlinked as "docker", it reports "docker version X" not "podman version X".
+if [[ -n "${PI_CONTAINER_RUNTIME:-}" ]]; then
+  DOCKER_CMD="${PI_CONTAINER_RUNTIME}"
+else
+  DOCKER_CMD="docker"
+  _pi_detected_version=$(docker --version 2>&1 || true)
+  _pi_docker_realpath=$(readlink -f "$(command -v docker || true)" 2>/dev/null || true)
+  if [[ "${_pi_detected_version}" == *podman* ]] || [[ "${_pi_docker_realpath}" == *podman* ]]; then
+    DOCKER_CMD="podman"
+  fi
+  unset _pi_detected_version _pi_docker_realpath
+fi

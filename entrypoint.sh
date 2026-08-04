@@ -27,8 +27,12 @@ if ! grep -q "^[^:]*:[^:]*:$(id -u):" /etc/passwd; then
         "$(id -u)" "$(id -g)" "${HOME}" >> /etc/passwd
 fi
 
-# Pass through to a shell when invoked via `pi:shell`; otherwise run pi.
+# Which agent this image wraps. Set via ENV in each Dockerfile so the two
+# images can share one entrypoint rather than duplicating the guards above.
+_AGENT="${PI_ENTRY_CMD:-pi}"
+
+# Pass through to a shell when invoked via `<agent>:shell`; otherwise run the agent.
 case "${1:-}" in
     bash|sh) exec "$@" ;;
-    *) exec pi "$@" ;;
+    *) exec "${_AGENT}" "$@" ;;
 esac

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#MISE description="Run the omp (oh-my-pi) coding agent in a Docker container"
+#MISE raw=true
+#MISE dir="{{cwd}}"
+set -euo pipefail
+
+# Same hardening as the pi task — the flags file is shared, _PI_VARIANT only
+# selects the image, state mount, and container home.
+_PI_VARIANT=omp
+# shellcheck source=tasks/pi/_docker_flags
+source "$(dirname "$0")/../pi/_docker_flags"
+
+DOCKER_FLAGS+=("--interactive")
+[ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
+
+if [ -n "${TMUX:-}" ]; then
+  tmux set-option -p allow-passthrough on 2>/dev/null || true
+  trap 'tmux set-option -p allow-passthrough off 2>/dev/null || true' EXIT
+fi
+
+OMP_ARGS=()
+if [[ -z "${PI_NO_CONTAINER_PROMPT:-}" ]]; then
+  OMP_ARGS+=(
+    "--append-system-prompt"
+    "You are running inside a Docker container as a non-root user. No Docker socket, sudo, or system package installation (apt requires root) is available."
+  )
+fi
+
+"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" "${OMP_ARGS[@]}" "$@"

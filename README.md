@@ -15,6 +15,10 @@ A [mise](https://mise.jdx.dev) shim that wraps the **pi** AI coding agent in a [
 
 Pi defaults to running with full access to your filesystem. This repo constrains it so the agent cannot touch files outside your project, cannot escalate privileges, and runs as your own user.
 
+A second agent, **omp** ([oh-my-pi](https://github.com/can1357/oh-my-pi) — a different
+project, not a version of pi), is wrapped the same way under the `omp:` tasks. Both
+share one set of hardening flags. See [omp (oh-my-pi)](#omp-oh-my-pi).
+
 > **This is "less YOLO", not "no YOLO".** Container escapes exist. The mounted directories are fully writable. This is a meaningful reduction in risk, not a security guarantee.
 
 ## Why use this?
@@ -42,13 +46,16 @@ cd pi-less-yolo
 mise run install
 ```
 
-`install` writes a single file — `~/.config/mise/conf.d/pi-less-yolo.toml` — that points mise at the `tasks/` directory in the cloned repo. The five pi tasks become available globally from any directory. The repo must stay at the cloned path; if you move it, re-run `mise run install`.
+`install` writes a single file — `~/.config/mise/conf.d/pi-less-yolo.toml` — that points mise at the `tasks/` directory in the cloned repo. The `pi:` and `omp:` tasks become available globally from any directory. The repo must stay at the cloned path; if you move it, re-run `mise run install`.
 
-Then build the Docker image (one-time, ~2 minutes):
+Then build the image for whichever agent you want (one-time, ~2 minutes each):
 
 ```bash
-mise run pi:build
+mise run pi:build     # the pi agent
+mise run omp:build    # the omp (oh-my-pi) agent — only if you want it
 ```
+
+You don't need both. Each run task builds its own image on first use if it is missing.
 
 ## Usage
 
@@ -103,6 +110,69 @@ alias pi='mise run pi'
 | `mise run pi:shell` | Open a bash shell in the container (same mounts as `pi`) |
 | `mise run pi:upgrade` | Upgrade pi to the latest npm release and rebuild |
 | `mise run pi:health` | Check the setup for common problems |
+| `mise run omp` | Run the omp (oh-my-pi) coding agent in the sandboxed container |
+| `mise run omp:readonly` | Run omp with the project directory mounted read-only and write tools disabled |
+| `mise run omp:build` | Build or rebuild the omp container image |
+| `mise run omp:shell` | Open a bash shell in the omp container (same mounts as `omp`) |
+
+## omp (oh-my-pi)
+
+[oh-my-pi](https://github.com/can1357/oh-my-pi) is a separate coding agent — a fork
+of Mario Zechner's pi-mono, not the same project as the `pi` this repo wraps. It runs
+in the same sandbox under its own image and task namespace:
+
+```bash
+cd ~/my-project
+mise run omp
+```
+
+Both agents can be installed side by side. They share `tasks/pi/_docker_flags`
+verbatim, so every hardening flag, mount guard, and key-forwarding rule documented
+under [Security model](#security-model) applies identically to `omp`. What differs:
+
+| | `pi` | `omp` |
+|---|---|---|
+| Image | `pi-less-yolo:latest` (Chainguard Node) | `omp-less-yolo:latest` (Bun) |
+| Host state | `~/.pi/agent` → `/pi-agent` | `~/.omp` → `/home/ompuser/.omp` |
+| Container `$HOME` | `/home/piuser` | `/home/ompuser` |
+| Version pin | `Dockerfile` | `Dockerfile.omp` |
+| Approval default | n/a | lowered from `yolo` to `write` ([below](#approval-mode)) |
+| Read-only tools | `read,grep,find,ls` | `read,grep,glob,ast_grep` |
+
+State is kept separate on purpose: the two agents use incompatible config formats
+and session layouts, so `mise run omp` will not see your pi sessions or auth, and
+you will need to authenticate omp separately.
+
+There is no `omp:upgrade` or `omp:health` task — `pi:health` checks the pi setup
+only. Bump the omp pins by editing `Dockerfile.omp` (Renovate opens PRs for both
+`@oh-my-pi/*` packages) and running `mise run omp:build`.
+
+### Approval mode
+
+omp ships with `tools.approvalMode: yolo`, which auto-approves its `exec` tier —
+shelling out, driving a browser, spawning subagents — with no prompt. This image
+lowers that floor to `write`: reads and writes are still automatic, `exec` prompts.
+
+It is applied as a read-only `PI_CONFIG_FILES` overlay baked into the image, so it
+takes effect without touching your own `config.yml`. Opt back out per session:
+
+```bash
+mise run omp -- --yolo                      # upstream behaviour
+mise run omp -- --approval-mode always-ask  # prompt for writes too
+```
+
+> **Why this differs from `pi`.** omp's tool set is much broader — `browser`,
+> `computer`, `eval`, `task` (subagents). Those are not disabled here, but with
+> `exec` gated behind a prompt they cannot fire unattended. The `computer` tool is
+> disabled upstream by default and nothing here enables it.
+
+### Read-only mode (omp)
+
+`mise run omp:readonly` mounts the project `:ro` and restricts omp to
+`read,grep,glob,ast_grep` with `--approval-mode always-ask`. The same caveat as
+[`pi:readonly`](#read-only-mode-pi) applies: the `:ro` mount is kernel-enforced, the
+tool restriction is enforced by omp in userspace, and `~/.omp` stays writable
+because omp writes session history there.
 
 ## Agent Client Protocol (ACP) Connections
 
@@ -172,6 +242,13 @@ rm -rf ~/.pi/agent
 rm -rf /path/to/pi-less-yolo
 ```
 
+If you built the omp image, remove its state too:
+
+```bash
+docker rmi omp-less-yolo:latest
+rm -rf ~/.omp
+```
+
 ## Authentication
 
 Pi supports two ways to authenticate with a provider:
@@ -203,9 +280,30 @@ The following environment variables are forwarded from your host into the contai
 | MiniMax | `MINIMAX_API_KEY` |
 | MiniMax (China) | `MINIMAX_CN_API_KEY` |
 
-Pi config variables (`PI_SKIP_VERSION_CHECK`, `PI_CACHE_RETENTION`, `PI_PACKAGE_DIR`) and editor variables (`VISUAL`, `EDITOR`) are also forwarded. No other host environment variables are passed into the container.
+Pi config variables (`PI_SKIP_VERSION_CHECK`, `PI_CACHE_RETENTION`, `PI_PACKAGE_DIR`) and editor variables (`VISUAL`, `EDITOR`) are also forwarded.
+
+`mise run omp` forwards everything above **plus** the following, which omp resolves
+and pi does not. They are added only for the omp variant, so pi's forwarded surface
+is unchanged:
+
+| Provider / purpose | Environment Variable |
+|---|---|
+| Anthropic (OAuth token; takes precedence over the API key) | `ANTHROPIC_OAUTH_TOKEN` |
+| Anthropic via Azure Foundry | `ANTHROPIC_FOUNDRY_API_KEY` |
+| Google (Gemini image-tool fallback) | `GOOGLE_API_KEY` |
+| Fireworks | `FIREWORKS_API_KEY` |
+| Together | `TOGETHER_API_KEY` |
+| Hugging Face | `HUGGINGFACE_HUB_TOKEN`, `HF_TOKEN` |
+| NVIDIA | `NVIDIA_API_KEY` |
+| LiteLLM proxy | `LITELLM_API_KEY` |
+| omp named profile | `OMP_PROFILE` |
+
+No other host environment variables are passed into either container.
 
 **Auth file** (`~/.pi/agent/auth.json`): credentials stored here take priority over environment variables. Use `/login` inside pi to set this up interactively. See [pi's provider docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md) for details.
+
+omp stores its own credentials under `~/.omp/agent` instead, so authenticating one
+agent does nothing for the other.
 
 ## Security model
 
@@ -220,7 +318,24 @@ The container is launched with:
 
 The image itself also declares `USER 65532:65532`, so it fails closed: a bare
 `docker run pi-less-yolo:latest` that forgets `--user` still gets a non-root UID
-rather than root.
+rather than root. The omp image does the same.
+
+Two build-time properties matter as well:
+
+- **No Docker socket, ever.** It is never mounted, and `PI_EXTRA_MOUNTS` refuses both a
+  socket source and any directory enclosing one — mounting it would let the agent drive
+  the host daemon and start a privileged container.
+- **The mise signing key is a build secret** (`--mount=type=secret`), not a `COPY`, so it
+  never lands in an image layer. mise itself is GPG-verified during the build.
+
+For omp, the image additionally bakes a read-only overlay that lowers the agent's
+approval mode below upstream's default — see [Approval mode](#approval-mode).
+
+`$HOME` inside the container is intentionally mode `1777`. `--user` passes your host
+UID, which the image cannot know at build time, so a fixed owner would leave `$HOME`
+unwritable for everyone whose UID isn't the baked-in default. The sticky bit is what
+makes this safe; `--cap-drop=ALL` and `--no-new-privileges` mean nothing there can
+escalate.
 
 Mounting the directory at its real path (rather than a fixed `/workspace`) means pi's session tracking reflects the actual project path, so each project gets distinct session history.
 
@@ -236,7 +351,7 @@ read-write access to everything beneath it — `~/.ssh`, `~/.aws`, and `~/.pi/ag
 included. Those two cases abort with an error. Set `PI_ALLOW_WIDE_MOUNT=1` if you
 genuinely mean it.
 
-### Read-only mode
+### Read-only mode (pi)
 
 `mise run pi:readonly` mounts the project directory read-only and restricts pi to the `read`, `grep`, `find`, and `ls` tools. The agent can answer questions about the codebase but cannot write files or run shell commands.
 
@@ -350,8 +465,9 @@ starting.
 > are refused outright rather than warned about.
 >
 > Note also that `target` is not restricted, so a mount can shadow paths inside the
-> image (for example `/usr/local/bin/...`). Choose targets under `/home/piuser`
-> unless you have a specific reason not to.
+> image (for example `/usr/local/bin/...`). Choose targets under the container's
+> `$HOME` unless you have a specific reason not to — `/home/piuser` for `pi`,
+> `/home/ompuser` for `omp`.
 
 ### Resource limits
 
@@ -419,7 +535,9 @@ sudo ln -s "$(which podman)" /usr/local/bin/docker
 > [Bash manual on Aliases](https://www.gnu.org/software/bash/manual/bash.html#Aliases).
 > Use `PI_CONTAINER_RUNTIME=podman`, the `podman-docker` package, or a symlink instead.
 
-All tasks (`pi`, `pi:readonly`, `pi:build`, `pi:shell`) work identically with podman.
+All tasks work identically with podman, for both agents (`pi`, `pi:readonly`,
+`pi:build`, `pi:shell`, `omp`, `omp:readonly`, `omp:build`, `omp:shell`). CI builds
+and smoke-tests both images under Docker and Podman.
 
 ## Customising the container
 
@@ -432,9 +550,14 @@ mise run pi:build
 
 The `npm install -g` line near the bottom of `Dockerfile` pins the pi version. `mise run pi:upgrade` updates it automatically; you can also edit the version string by hand.
 
+The omp image is `Dockerfile.omp`, rebuilt with `mise run omp:build`. Its `bun install -g`
+line pins both `@oh-my-pi/pi-coding-agent` and `@oh-my-pi/pi-natives` — keep the two
+versions identical, since the natives addon is compiled against a specific agent release.
+
 ## Related projects
 
 - [pi-coding-agent](https://github.com/earendil-works/pi) — the upstream AI coding agent this repo wraps
+- [oh-my-pi](https://github.com/can1357/oh-my-pi) — the `omp` agent, wrapped by the `omp:` tasks; a fork of [pi-mono](https://github.com/badlogic/pi-mono), separate from the pi above
 - [mise](https://mise.jdx.dev) — the polyglot dev-tool manager used for task running
 - [Chainguard Images](https://chainguard.dev) — minimal, hardened container base images used here
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — Anthropic's official sandboxed coding agent CLI, a similar concept

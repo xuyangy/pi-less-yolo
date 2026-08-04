@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#MISE description="Smoke test the omp (oh-my-pi) image: starts, defaults to non-root, resolves its state dir onto the host mount, and lowers the approval mode below upstream yolo"
+set -euo pipefail
+
+REPO_ROOT="${MISE_TASK_DIR}/../../.."
+
+# shellcheck source=tasks/pi/_docker_flags
+_PI_VARIANT=omp source "${REPO_ROOT}/tasks/pi/_docker_flags"
+
+# --- starts at all ----------------------------------------------------------
+version=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" --version 2>&1 | tail -1)
+[[ "${version}" == omp/* ]] || { echo "FAIL: unexpected --version output: ${version}"; exit 1; }
+echo "  OK omp starts (${version})"
+
+# --- image fails closed to a non-root UID -----------------------------------
+uid=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" bash -c 'id -u')
+[ "${uid}" != "0" ] || { echo "FAIL: omp image defaults to root"; exit 1; }
+echo "  OK omp image defaults to non-root (uid ${uid})"
+
+# --- state dir resolves onto the mount, not beside it -----------------------
+# PI_CONFIG_DIR is joined under $HOME rather than treated as an absolute path,
+# so an absolute value would silently resolve outside the mount and lose all
+# state. Assert the resolved path is the mount target.
+resolved=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config path 2>&1 | tail -1)
+[ "${resolved}" = "${_PI_STATE_TARGET}/agent" ] || {
+  echo "FAIL: omp resolved its state dir to '${resolved}', expected '${_PI_STATE_TARGET}/agent'"
+  exit 1
+}
+echo "  OK omp state dir resolves onto the host mount (${resolved})"
+
+# --- a container write reaches the host -------------------------------------
+probe=".omp-smoke-$$"
+"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" \
+  bash -c "touch '${_PI_STATE_TARGET}/${probe}'"
+if [ -e "${_PI_STATE_HOST}/${probe}" ]; then
+  rm -f "${_PI_STATE_HOST}/${probe}"
+  echo "  OK writes to the state dir persist to the host"
+else
+  echo "FAIL: write inside the container did not reach ${_PI_STATE_HOST}"; exit 1
+fi
+
+# --- approval mode is lowered from upstream's yolo default ------------------
+# Baked as a PI_CONFIG_FILES overlay in Dockerfile.omp. yolo auto-approves the
+# exec tier — shell, browser, subagents — with no prompt.
+mode=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config get tools.approvalMode 2>&1 | tail -1)
+[ "${mode}" = "write" ] || { echo "FAIL: approvalMode is '${mode}', expected 'write'"; exit 1; }
+echo "  OK approval mode lowered to '${mode}' (upstream default is yolo)"
+
+# --- the readonly tool set is accepted by this omp version ------------------
+# Guards against a future release renaming a tool, which would otherwise only
+# surface when someone actually ran omp:readonly.
+"${DOCKER_CMD}" run --rm "${PI_IMAGE}" --tools read,grep,glob,ast_grep --version > /dev/null 2>&1 \
+  || { echo "FAIL: omp:readonly tool set rejected by this omp version"; exit 1; }
+echo "  OK omp:readonly tool set is valid for this omp version"
