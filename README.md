@@ -110,13 +110,21 @@ The `mise run pi:pi-acp` task command can be utilzed for connecting IDE's over [
 
 The task will install [pi-acp](https://github.com/svkozak/pi-acp) to the `/pi-agent/npm-global` shared directory, if not already installed.
 
+The version is pinned in `tasks/pi/pi-acp` (`PI_ACP_VERSION`) and tracked by Renovate,
+for the same reason pi itself is pinned in the Dockerfile: `/pi-agent/npm-global/bin` is
+prepended to `PATH` and persists on the host, so anything installed there can shadow any
+command in every later session. Bump the pin deliberately rather than floating on
+`latest`.
+
 Most IDE's will expect to run the `pi-acp` command, so add this to your shell profile:
 
 ```bash
 alias pi-acp='mise run pi:pi-acp'
 ```
 
-To update the package run the task `mise run pi:shell` and once inside the shell container run `npm install -g pi-acp` at the prompt.
+To move to a newer release, edit `PI_ACP_VERSION` in `tasks/pi/pi-acp`, then remove the
+installed copy so the task reinstalls at the new pin:
+`rm -rf ~/.pi/agent/npm-global/lib/node_modules/pi-acp`.
 
 
 ## Staying current
@@ -210,15 +218,34 @@ The container is launched with:
 - `--volume $(pwd):$(pwd)` — your current directory is mounted at its real host path; the container's working directory is set to match
 - `--volume ~/.pi/agent:/pi-agent` — pi config, credentials, and sessions
 
+The image itself also declares `USER 65532:65532`, so it fails closed: a bare
+`docker run pi-less-yolo:latest` that forgets `--user` still gets a non-root UID
+rather than root.
+
 Mounting the directory at its real path (rather than a fixed `/workspace`) means pi's session tracking reflects the actual project path, so each project gets distinct session history.
 
 The agent cannot reach other directories on your host. It can make arbitrary network requests and execute any command available inside the container image.
 
+**API keys** are passed to the container by name (`--env ANTHROPIC_API_KEY`), not as
+`--env NAME=value`, so key material never appears in the `docker run` command line
+where other users on the host could read it out of `ps`.
+
+**Wide mounts are refused.** Because the containment boundary is "the agent only sees
+`$(pwd)`", running from your home directory or `/` would quietly hand the agent
+read-write access to everything beneath it — `~/.ssh`, `~/.aws`, and `~/.pi/agent`
+included. Those two cases abort with an error. Set `PI_ALLOW_WIDE_MOUNT=1` if you
+genuinely mean it.
+
 ### Read-only mode
 
-`mise run pi:readonly` mounts the project directory read-only and restricts pi to the `read`, `grep`, `find`, and `ls` tools. The agent can answer questions about the codebase but cannot write files or run shell commands — enforced at the kernel level via the `:ro` volume mount.
+`mise run pi:readonly` mounts the project directory read-only and restricts pi to the `read`, `grep`, `find`, and `ls` tools. The agent can answer questions about the codebase but cannot write files or run shell commands.
 
-Use it for untrusted or sensitive codebases.
+Two different mechanisms are at work here, and they are not equally strong:
+
+- **Your project directory is protected by the kernel**, via the `:ro` bind mount. Nothing inside the container can write to it, whatever pi does.
+- **`~/.pi/agent` stays writable**, and the restriction to read-only *tools* is enforced by pi in userspace, not by the kernel. The agent dir cannot be mounted `:ro` — pi writes session history there on every run and aborts with `EROFS` if it can't.
+
+So `pi:readonly` gives you a hard guarantee about your source tree and a softer one about everything else. It is a good fit for reading a codebase you don't trust; it is not a containment boundary against a pi bug or a prompt injection that reaches a write path in `/pi-agent`.
 
 ### Pi packages
 
@@ -309,12 +336,22 @@ export PI_EXTRA_MOUNTS="$HOME/.llm-wiki:/home/piuser/.llm-wiki;$HOME/.agents:/ho
 ```
 
 Format: `source:target[:mode]`, entries separated by `;`. `mode` is `rw` (default) or
-`ro`. Malformed entries and sources that don't exist on the host both print a warning
-and are skipped — they don't stop pi from starting.
+`ro`. Both paths must be absolute. Malformed entries, relative paths, and sources that
+don't exist on the host all print a warning and are skipped — they don't stop pi from
+starting.
 
 > **Security note:** the default mode is `rw`, so the agent can write to any mounted
 > directory unless you add `:ro`. Only mount directories you're comfortable with the
 > agent modifying.
+>
+> Mounting a container runtime socket (`/var/run/docker.sock` or the Podman
+> equivalent) would let the agent drive the host daemon and start a fully
+> privileged container — a complete escape from this sandbox in one line. Sockets
+> are refused outright rather than warned about.
+>
+> Note also that `target` is not restricted, so a mount can shadow paths inside the
+> image (for example `/usr/local/bin/...`). Choose targets under `/home/piuser`
+> unless you have a specific reason not to.
 
 ### Resource limits
 

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#MISE description="Smoke test the sandbox guards: non-root image default, wide-mount refusal, socket/relative-path rejection in PI_EXTRA_MOUNTS, API keys kept out of argv, and HOME injection into /etc/passwd"
+set -euo pipefail
+
+REPO_ROOT="${MISE_TASK_DIR}/../../.."
+
+# Reuse the runtime detection in _docker_flags rather than repeating
+# "${PI_CONTAINER_RUNTIME:-docker}" here. It also resolves the podman-docker /
+# symlink configuration, where the command is literally named `docker` but
+# invokes rootless Podman — which a name check cannot see, and which still needs
+# --userns=keep-id below. Sourcing also gives us DOCKER_FLAGS, unused here.
+# shellcheck source=tasks/pi/_docker_flags
+source "${REPO_ROOT}/tasks/pi/_docker_flags"
+
+# --- image fails closed to a non-root UID -----------------------------------
+# The run tasks always pass --user, so this only matters for a bare `docker run`.
+# Without a trailing USER the image would default to root, and the 1777 $HOME
+# and world-writable /etc/passwd would stop being safe.
+uid=$("${DOCKER_CMD}" run --rm pi-less-yolo:latest bash -c 'id -u')
+[ "${uid}" != "0" ] || { echo "FAIL: image defaults to root"; exit 1; }
+echo "  OK image defaults to non-root (uid ${uid})"
+
+# --- $(pwd) wide-mount refusal ----------------------------------------------
+# Sourcing from $HOME must abort rather than mount the whole home directory.
+if (cd "${HOME}" && bash -c "source '${REPO_ROOT}/tasks/pi/_docker_flags'") > /dev/null 2>&1; then
+  echo "FAIL: mounting \$HOME was not refused"; exit 1
+fi
+echo "  OK refuses to mount \$HOME"
+
+# ...and the documented override must still work.
+(cd "${HOME}" && PI_ALLOW_WIDE_MOUNT=1 bash -c "source '${REPO_ROOT}/tasks/pi/_docker_flags'") > /dev/null 2>&1 \
+  || { echo "FAIL: PI_ALLOW_WIDE_MOUNT=1 did not override the refusal"; exit 1; }
+echo "  OK PI_ALLOW_WIDE_MOUNT=1 overrides the refusal"
+
+# --- PI_EXTRA_MOUNTS rejects a socket source --------------------------------
+# Mounting a container runtime socket would hand the agent the host daemon.
+# The socket is created inside the container, which already ships python3, so
+# this test needs nothing beyond the documented prerequisites (mise, a container
+# runtime, git) — the host is not assumed to have python3.
+# Binding happens at the short in-container path (/out/s.sock) rather than the
+# host path, which also sidesteps the ~104-byte AF_UNIX path limit.
+sock_dir=$(mktemp -d)
+trap 'rm -rf "${sock_dir}"' EXIT
+
+# --userns=keep-id for Podman, matching tasks/pi/_docker_flags. Rootless Podman
+# otherwise maps the container UID to a subordinate host UID, which cannot
+# traverse the 0700 mktemp directory, so the bind below would fail before the
+# socket exists. DOCKER_CMD comes from _docker_flags, so the podman-docker shim
+# is already resolved to "podman" by this point; the glob additionally covers
+# PI_CONTAINER_RUNTIME being set to an absolute path like /usr/bin/podman.
+SOCK_FLAGS=("--rm" "--user" "$(id -u):$(id -g)" "--volume" "${sock_dir}:/out")
+[[ "${DOCKER_CMD}" == *podman* ]] && SOCK_FLAGS+=("--userns=keep-id")
+
+"${DOCKER_CMD}" run "${SOCK_FLAGS[@]}" pi-less-yolo:latest \
+  bash -c 'python3 -c "import socket; socket.socket(socket.AF_UNIX).bind(\"/out/s.sock\")"'
+[ -S "${sock_dir}/s.sock" ] || { echo "FAIL: could not create test socket"; exit 1; }
+
+if PI_EXTRA_MOUNTS="${sock_dir}/s.sock:/var/run/docker.sock" \
+   bash -c "source '${REPO_ROOT}/tasks/pi/_docker_flags'" > /dev/null 2>&1; then
+  echo "FAIL: socket source was not refused"; exit 1
+fi
+echo "  OK PI_EXTRA_MOUNTS refuses a socket source"
+
+# --- ...and rejects a parent directory that encloses one --------------------
+# The direct-socket check alone is bypassable: mounting the enclosing directory
+# exposes the socket just the same.
+for parent in /var/run /run "${HOME}/.docker"; do
+  if PI_EXTRA_MOUNTS="${parent}:/mnt/rt" \
+     bash -c "source '${REPO_ROOT}/tasks/pi/_docker_flags'" > /dev/null 2>&1; then
+    echo "FAIL: parent directory '${parent}' enclosing a runtime socket was not refused"; exit 1
+  fi
+done
+echo "  OK PI_EXTRA_MOUNTS refuses directories enclosing a runtime socket"
+
+# --- PI_EXTRA_MOUNTS skips relative paths -----------------------------------
+for spec in "relative/dir:/tgt" "/tmp:relative-tgt"; do
+  out=$(PI_EXTRA_MOUNTS="${spec}" bash -c "source '${REPO_ROOT}/tasks/pi/_docker_flags'" 2>&1 >/dev/null)
+  [[ "${out}" == *"relative path"* ]] || { echo "FAIL: '${spec}' did not warn about relative paths"; exit 1; }
+done
+echo "  OK PI_EXTRA_MOUNTS skips relative paths"
+
+# --- API keys are passed by name, never by value ----------------------------
+# name=value would expose keys to `ps` on a shared host and to `docker inspect`.
+canary="sk-ant-CANARY-DO-NOT-USE"
+flags=$(ANTHROPIC_API_KEY="${canary}" bash -c "
+  source '${REPO_ROOT}/tasks/pi/_docker_flags'
+  printf '%s\n' \"\${DOCKER_FLAGS[@]}\"
+")
+grep -qx "ANTHROPIC_API_KEY" <<< "${flags}" || { echo "FAIL: ANTHROPIC_API_KEY not forwarded"; exit 1; }
+grep -q "${canary}" <<< "${flags}" && { echo "FAIL: API key value leaked into docker argv"; exit 1; }
+echo "  OK API keys forwarded by name, value absent from argv"
+
+# --- HOME cannot inject a second /etc/passwd record -------------------------
+# /etc/passwd is world-writable so the entrypoint can register the runtime UID;
+# a newline or colon in HOME would let a caller append an extra account.
+for bad_home in "$(printf '/x\nevil::0:0::/:/bin/sh')" "/x:y"; do
+  if "${DOCKER_CMD}" run --rm --user 1000:1000 --env HOME="${bad_home}" \
+       pi-less-yolo:latest bash -c 'true' > /dev/null 2>&1; then
+    echo "FAIL: malformed HOME was accepted"; exit 1
+  fi
+done
+echo "  OK entrypoint rejects HOME containing ':' or a newline"
+
+# A well-formed HOME must still produce exactly one passwd entry.
+count=$("${DOCKER_CMD}" run --rm --user 1000:1000 pi-less-yolo:latest \
+  bash -c 'grep -c "^piuser" /etc/passwd')
+[ "${count}" = "1" ] || { echo "FAIL: expected 1 piuser passwd entry, got ${count}"; exit 1; }
+echo "  OK benign HOME still registers exactly one passwd entry"

@@ -56,6 +56,15 @@
       ],
       "depNameTemplate": "@earendil-works/pi-coding-agent",
       "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tasks/pi/pi-acp$/"],
+      "matchStrings": [
+        "PI_ACP_VERSION=\"(?<currentValue>[\\d.]+)\""
+      ],
+      "depNameTemplate": "pi-acp",
+      "datasourceTemplate": "npm"
     }
   ]
 }

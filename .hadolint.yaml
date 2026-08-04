@@ -1,8 +1,4 @@
 ignored:
-  # USER root is intentional — the runtime user is set via --user $(id -u):$(id -g)
-  # in the docker run invocation, not baked into the image.
-  - DL3002
-
   # The base image is pinned by digest; pinning individual apk packages adds
   # maintenance burden with minimal additional reproducibility benefit.
   - DL3018

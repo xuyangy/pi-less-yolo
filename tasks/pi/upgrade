@@ -12,7 +12,23 @@ DOCKER_CMD="${PI_CONTAINER_RUNTIME:-docker}"
 }
 
 CURRENT=$(perl -ne 'print $1 if /pi-coding-agent@([\d.]+)/' "${DOCKERFILE}")
-LATEST=$("${DOCKER_CMD}" run --rm --entrypoint npm "${PI_IMAGE}" view @earendil-works/pi-coding-agent version)
+
+# Same hardening as the pi run tasks: `npm view` is a network call, so give it
+# no capabilities and no root even though it only reads the registry.
+LATEST=$("${DOCKER_CMD}" run --rm \
+  --user "$(id -u):$(id -g)" \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --entrypoint npm "${PI_IMAGE}" view @earendil-works/pi-coding-agent version)
+
+# LATEST is attacker-influenceable (registry, mirror, or proxy response) and is
+# substituted into a Perl expression below. Reject anything that is not a bare
+# semver before it gets near an eval-like context.
+if [[ ! "${LATEST}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "error: registry returned an unexpected version string: '${LATEST}'" >&2
+  echo "       refusing to edit the Dockerfile" >&2
+  exit 1
+fi
 
 if [[ "${CURRENT}" == "${LATEST}" ]]; then
   echo "Already at latest pi version: ${CURRENT}"
@@ -22,7 +38,9 @@ fi
 echo "Upgrading pi: ${CURRENT} → ${LATEST}"
 
 # perl -pi -e is cross-platform (macOS and Linux); avoids sed -i / sed -i ''
-# incompatibility.
-perl -pi -e "s/pi-coding-agent\@[\d.]+/pi-coding-agent\@${LATEST}/" "${DOCKERFILE}"
+# incompatibility. The version is passed via -s (as $ver) rather than
+# interpolated by the shell, so the replacement text is data, never code.
+perl -pi -s -e 's/pi-coding-agent\@[\d.]+/pi-coding-agent\@$ver/' \
+  -- -ver="${LATEST}" "${DOCKERFILE}"
 
 mise run pi:build

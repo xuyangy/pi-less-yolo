@@ -66,4 +66,12 @@ ENV HOME=/home/piuser
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# Default to a non-root UID so the image fails closed. The run tasks always pass
+# --user $(id -u):$(id -g), which overrides this; the default only matters for a
+# bare `docker run pi-less-yolo:latest`. Without it the image would default to
+# root (USER root above is needed for the build steps), and the 1777 $HOME and
+# world-writable /etc/passwd would stop being safe. 65532 is the conventional
+# nonroot UID and needs no passwd entry — the entrypoint synthesizes one.
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -27,7 +27,7 @@ Dockerfile, and a CI smoke test.
 | `.mise/tasks/lint/shell` | shellcheck on all executable scripts under `tasks/` and `.mise/tasks/` |
 | `.mise/tasks/lint/docker` | hadolint on `Dockerfile` |
 | `.mise.toml` | Pins tool versions (shellcheck, hadolint) for local development |
-| `.hadolint.yaml` | Suppresses three intentional hadolint rules with justification comments (DL3002, DL3018, DL3059) |
+| `.hadolint.yaml` | Suppresses two intentional hadolint rules with justification comments (DL3018, DL3059) |
 | `.github/workflows/ci.yml` | CI: lint job + build job (image build, `--version` smoke test, `python3 --version`) |
 | `renovate.json` | Renovate config (see below) |
 | `.github/dependabot.yml` | Dependabot config (see below) |

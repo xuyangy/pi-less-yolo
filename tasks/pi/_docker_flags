@@ -23,6 +23,22 @@ fi
 # container's non-root UID).
 mkdir -p "${HOME}/.pi/agent"
 
+# The whole containment story is "the agent only sees $(pwd)". That holds only
+# if $(pwd) is actually a project directory: running from $HOME or / mounts your
+# entire home (~/.ssh, ~/.aws, ~/.pi/agent) or the whole filesystem read-write.
+# Refuse by default; PI_ALLOW_WIDE_MOUNT=1 is the deliberate override.
+_pi_cwd="$(pwd -P)"
+_pi_home="$(cd "${HOME}" && pwd -P)"
+if [[ -z "${PI_ALLOW_WIDE_MOUNT:-}" ]]; then
+  if [[ "${_pi_cwd}" == "/" || "${_pi_cwd}" == "${_pi_home}" ]]; then
+    echo "error: refusing to mount '${_pi_cwd}' — this would give the agent" >&2
+    echo "       read-write access to everything under it, including ~/.ssh." >&2
+    echo "       cd into a project directory, or set PI_ALLOW_WIDE_MOUNT=1 to override." >&2
+    exit 1
+  fi
+fi
+unset _pi_cwd _pi_home
+
 # Permissions:
 #   --user $(id -u):$(id -g)   files created in /workspace are owned by the
 #                               calling user on the host, not root.
@@ -80,8 +96,13 @@ PI_ENV_VARS=(
   MINIMAX_API_KEY
   MINIMAX_CN_API_KEY
 )
+# Pass the NAME only, not name=value. Both docker and podman then read the value
+# from their own environment, so API keys never appear in the `docker run` argv —
+# where any local user could read them out of `ps aux`, and where they would be
+# retained in the container config for `docker inspect`. These vars are by
+# definition exported (this script inherited them), so the lookup succeeds.
 for var in "${PI_ENV_VARS[@]}"; do
-  [ -n "${!var:-}" ] && DOCKER_FLAGS+=("--env" "$var=${!var}")
+  [ -n "${!var:-}" ] && DOCKER_FLAGS+=("--env" "$var")
 done
 
 # Git identity: mount ~/.gitconfig read-only. Opt out with PI_NO_GITCONFIG=1.
@@ -111,6 +132,44 @@ fi
 #   mode   — rw (default) or ro
 # Example:
 #   export PI_EXTRA_MOUNTS="$HOME/.llm-wiki:/home/piuser/.llm-wiki;$HOME/.agents:/home/piuser/.agents"
+#
+# Container-runtime socket paths. Exposing one of these — directly, or by
+# mounting any directory above it — lets the agent drive the host daemon and
+# start a privileged container with / mounted, which is a full escape. AGENTS.md
+# states the absent Docker socket as a security invariant, so this is enforced
+# rather than warned about.
+#
+# Matching is on path, not on the socket existing right now: a bind mount of a
+# parent directory stays live, so a socket that appears later would be exposed
+# too.
+_PI_RUNTIME_SOCKETS=(
+  /var/run/docker.sock
+  /run/docker.sock
+  /var/run/containerd/containerd.sock
+  /run/containerd/containerd.sock
+  /var/run/crio/crio.sock
+  /run/crio/crio.sock
+  /var/run/podman/podman.sock
+  /run/podman/podman.sock
+  "${HOME}/.docker/run/docker.sock"
+  "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
+  "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+)
+
+# True when mounting $1 would expose a runtime socket at or beneath it.
+_pi_exposes_runtime_socket() {
+  local raw="$1" resolved sock base
+  # Resolve symlinks (on many Linux distros /var/run is a link to /run) so a
+  # symlinked spelling of the same directory cannot slip past the comparison.
+  resolved=$(cd "${raw}" 2>/dev/null && pwd -P) || resolved="${raw}"
+  for sock in "${_PI_RUNTIME_SOCKETS[@]}"; do
+    for base in "${raw}" "${resolved}"; do
+      [[ "${sock}" == "${base}" || "${sock}" == "${base%/}"/* ]] && return 0
+    done
+  done
+  return 1
+}
+
 if [[ -n "${PI_EXTRA_MOUNTS:-}" ]]; then
   _pi_ifs="$IFS"
   IFS=';'
@@ -121,7 +180,25 @@ if [[ -n "${PI_EXTRA_MOUNTS:-}" ]]; then
       _pi_src="${BASH_REMATCH[1]}"
       _pi_tgt="${BASH_REMATCH[2]}"
       _pi_mode="${BASH_REMATCH[4]:-rw}"
-      if [[ -e "${_pi_src}" ]]; then
+      if [[ "${_pi_src}" != /* || "${_pi_tgt}" != /* ]]; then
+        # A relative source resolves against the caller's cwd, which is not what
+        # anyone means here; a relative target is rejected by the runtime anyway.
+        echo "warning: PI_EXTRA_MOUNTS entry '${_pi_spec}' uses a relative path (both source and target must be absolute) — skipping mount" >&2
+      elif [[ -S "${_pi_src}" ]]; then
+        # Bind-mounting the container runtime's own socket hands the agent full
+        # control of the host daemon — it can start a privileged container and
+        # mount /. No warning is sufficient here, so refuse outright.
+        echo "error: PI_EXTRA_MOUNTS source '${_pi_src}' is a socket — refusing." >&2
+        echo "       Mounting a container runtime socket gives the agent full host access." >&2
+        exit 1
+      elif _pi_exposes_runtime_socket "${_pi_src}"; then
+        # Same escape, reached one level up: '/var/run' exposes
+        # '/var/run/docker.sock' just as surely as naming the socket directly.
+        echo "error: PI_EXTRA_MOUNTS source '${_pi_src}' contains a container runtime socket — refusing." >&2
+        echo "       Mounting a directory above the runtime socket gives the agent full host access." >&2
+        echo "       Mount a narrower path that does not enclose the socket." >&2
+        exit 1
+      elif [[ -e "${_pi_src}" ]]; then
         DOCKER_FLAGS+=("--volume" "${_pi_src}:${_pi_tgt}:${_pi_mode}")
       else
         echo "warning: PI_EXTRA_MOUNTS source '${_pi_src}' not found — skipping mount" >&2

@@ -10,5 +10,19 @@ source "$(dirname "$0")/_docker_flags"
 DOCKER_FLAGS+=("--interactive")
 [ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
 
-# Will install pi-acp, to /pi-agent/npm-global if not there and/or starts pi-acp
-"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" sh -c 'if ! command -v pi-acp > /dev/null 2>&1; then npm install -g pi-acp && pi-acp; else pi-acp; fi'
+# Pinned, like pi itself in the Dockerfile. This installs into the host-mounted
+# /pi-agent/npm-global, which the image prepends to PATH for *every* subsequent
+# run — so an unpinned floating install would let one bad release of a
+# third-party package shadow any command in all future sessions. Bump
+# deliberately (Renovate tracks it via renovate.json).
+PI_ACP_VERSION="0.0.33"
+
+# Installs pi-acp to /pi-agent/npm-global if absent, then starts it.
+# shellcheck disable=SC2016  # $1 is a positional parameter in the child sh -c, not the current shell
+"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" sh -c '
+  set -e
+  if ! command -v pi-acp > /dev/null 2>&1; then
+    npm install -g "pi-acp@$1"
+  fi
+  exec pi-acp
+' -- "${PI_ACP_VERSION}"
