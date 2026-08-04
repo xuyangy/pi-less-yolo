@@ -109,6 +109,11 @@ PI_ENV_VARS=(
   VISUAL
   EDITOR
   ANTHROPIC_API_KEY
+  # Both agents document this as an alternative to the API key (`pi --help`;
+  # omp docs/environment-variables.md, where it outranks ANTHROPIC_API_KEY).
+  # Note neither agent refreshes an injected token — when it expires, requests
+  # fail until a fresh one is exported.
+  ANTHROPIC_OAUTH_TOKEN
   AZURE_OPENAI_API_KEY
   OPENAI_API_KEY
   GEMINI_API_KEY
@@ -130,7 +135,6 @@ PI_ENV_VARS=(
 # names that are unset on the host are skipped by the loop below either way.
 if [[ "${_PI_VARIANT:-pi}" == "omp" ]]; then
   PI_ENV_VARS+=(
-    ANTHROPIC_OAUTH_TOKEN
     ANTHROPIC_FOUNDRY_API_KEY
     GOOGLE_API_KEY
     FIREWORKS_API_KEY

@@ -265,6 +265,7 @@ The following environment variables are forwarded from your host into the contai
 | Provider | Environment Variable |
 |---|---|
 | Anthropic | `ANTHROPIC_API_KEY` |
+| Anthropic (OAuth token; takes precedence over the API key) | `ANTHROPIC_OAUTH_TOKEN` |
 | OpenAI | `OPENAI_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` |
 | Google Gemini | `GEMINI_API_KEY` |
@@ -282,13 +283,17 @@ The following environment variables are forwarded from your host into the contai
 
 Pi config variables (`PI_SKIP_VERSION_CHECK`, `PI_CACHE_RETENTION`, `PI_PACKAGE_DIR`) and editor variables (`VISUAL`, `EDITOR`) are also forwarded.
 
+> **`ANTHROPIC_OAUTH_TOKEN` is not refreshed.** Both agents document it as an
+> alternative to the API key, and both read it, but neither renews it — an OAuth
+> token carries an expiry, and once it lapses requests fail until you export a
+> fresh one. For unattended or long sessions, use `ANTHROPIC_API_KEY`.
+
 `mise run omp` forwards everything above **plus** the following, which omp resolves
 and pi does not. They are added only for the omp variant, so pi's forwarded surface
 is unchanged:
 
 | Provider / purpose | Environment Variable |
 |---|---|
-| Anthropic (OAuth token; takes precedence over the API key) | `ANTHROPIC_OAUTH_TOKEN` |
 | Anthropic via Azure Foundry | `ANTHROPIC_FOUNDRY_API_KEY` |
 | Google (Gemini image-tool fallback) | `GOOGLE_API_KEY` |
 | Fireworks | `FIREWORKS_API_KEY` |
