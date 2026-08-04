@@ -1,7 +1,9 @@
 ignored:
-  # The base image is pinned by digest; pinning individual apk packages adds
+  # Both base images are pinned by digest; pinning individual OS packages adds
   # maintenance burden with minimal additional reproducibility benefit.
+  # DL3018 is the apk rule (Dockerfile), DL3008 the apt one (Dockerfile.omp).
   - DL3018
+  - DL3008
 
   # RUN instructions are intentionally kept separate for readability and to
   # preserve distinct layer boundaries (install tools, install pi, install mise/uv).

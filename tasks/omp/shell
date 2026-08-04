@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-#MISE description="Open a bash shell in the pi container with the same mounts as the pi task"
+#MISE description="Open a bash shell in the omp container with the same mounts as the omp task"
 #MISE raw=true
 #MISE dir="{{cwd}}"
 set -euo pipefail
 
-# Explicit, not relying on the default in _docker_flags: an exported _PI_VARIANT
-# in the caller's shell would otherwise silently run the wrong agent.
-_PI_VARIANT=pi
+_PI_VARIANT=omp
 # shellcheck source=tasks/pi/_docker_flags
-source "$(dirname "$0")/_docker_flags"
+source "$(dirname "$0")/../pi/_docker_flags"
 
 DOCKER_FLAGS+=("--interactive")
 [ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")

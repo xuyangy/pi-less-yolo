@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#MISE description="Run omp read-only: project directory mounted read-only, file-modification tools disabled"
+#MISE raw=true
+#MISE dir="{{cwd}}"
+set -euo pipefail
+
+_PI_WORKDIR_RO=1
+_PI_VARIANT=omp
+# shellcheck source=tasks/pi/_docker_flags
+source "$(dirname "$0")/../pi/_docker_flags"
+
+DOCKER_FLAGS+=("--interactive")
+[ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
+
+# Two layers, and they are not equally strong (same caveat as pi:readonly):
+#   - the :ro mount on the project directory is kernel-enforced;
+#   - --tools and --approval-mode are enforced by omp itself, in userspace.
+# The state mount stays writable because omp writes session history there.
+#
+# Tool set mirrors pi:readonly's read,grep,find,ls using omp's names (verified
+# against `--tools` validation): glob replaces find/ls, ast_grep is the
+# search-only half of the AST pair — ast_edit, edit, write, bash, eval, browser,
+# computer, and task are all excluded. always-ask means anything that slipped
+# through still prompts.
+"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" \
+  --tools read,grep,glob,ast_grep \
+  --approval-mode always-ask "$@"

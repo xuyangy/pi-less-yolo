@@ -65,6 +65,17 @@
       ],
       "depNameTemplate": "pi-acp",
       "datasourceTemplate": "npm"
+    },
+    {
+      "description": "omp: pi-natives is the prebuilt addon for a specific pi-coding-agent release, so Dockerfile.omp requires both pins to match. Modelled as ONE dependency with two matchStrings (same approach as pi's Dockerfile+README badge) rather than two entries, which could otherwise produce a PR bumping only one and leaving an incompatible native addon.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^Dockerfile\\.omp$/"],
+      "matchStrings": [
+        "@oh-my-pi/pi-coding-agent@(?<currentValue>[\\d.]+)",
+        "@oh-my-pi/pi-natives@(?<currentValue>[\\d.]+)"
+      ],
+      "depNameTemplate": "@oh-my-pi/pi-coding-agent",
+      "datasourceTemplate": "npm"
     }
   ]
 }

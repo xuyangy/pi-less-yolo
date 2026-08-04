@@ -5,6 +5,9 @@
 set -euo pipefail
 
 _PI_WORKDIR_RO=1
+# Explicit, not relying on the default in _docker_flags: an exported _PI_VARIANT
+# in the caller's shell would otherwise silently run the wrong agent.
+_PI_VARIANT=pi
 # shellcheck source=tasks/pi/_docker_flags
 source "$(dirname "$0")/_docker_flags"
 
