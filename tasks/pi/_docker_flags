@@ -156,6 +156,69 @@ for var in "${PI_ENV_VARS[@]}"; do
   [ -n "${!var:-}" ] && DOCKER_FLAGS+=("--env" "$var")
 done
 
+# code-notify bridge. The agent's own hook (installed on the host by
+# `cn on pi` / `cn on omp` into the state directory already mounted above, so
+# the container sees it as an ordinary auto-discovered hook) cannot deliver a
+# notification from in here: no $TMUX, no host tmux socket, no notifier. It
+# only writes one small file per lifecycle event into a spool directory, and
+# the relay — started on the host, in the tmux pane this container renders
+# into — turns those into notifications.
+#
+# No new mount and no new capability: the spool lives inside the state
+# directory that is already bind-mounted. Opt out with PI_NO_CODE_NOTIFY=1.
+#
+# Defined here so pi and omp share it, but deliberately NOT started here: only
+# a task that actually runs the agent should spool anything, so each such task
+# calls _cn_relay_start itself and pairs it with _cn_relay_stop in its EXIT
+# trap. `<agent>:shell` sources this file too and must stay untouched.
+#
+# The relay inherits TMUX/TMUX_PANE from this shell, which is how a
+# notification ends up on the right pane. CODE_NOTIFY_RELAY_SESSION_PID is this
+# launcher: when it is gone the session is over, and the relay uses that both
+# to exit and to retire the running indicator if the container dies without a
+# clean turn end.
+_CN_SPOOL_HOST=""
+_CN_RELAY_PID=""
+_cn_relay_start() {
+  [[ -z "${PI_NO_CODE_NOTIFY:-}" ]] || return 0
+  command -v code-notify > /dev/null 2>&1 || return 0
+
+  _CN_SPOOL_HOST="${_PI_STATE_HOST}/.code-notify/$$"
+  if ! mkdir -p "${_CN_SPOOL_HOST}" 2> /dev/null; then
+    echo "warning: could not create the code-notify spool at ${_CN_SPOOL_HOST} — notifications disabled for this run" >&2
+    _CN_SPOOL_HOST=""
+    return 0
+  fi
+
+  # Unlike the API keys above this is passed as name=value, because the value
+  # is computed here rather than inherited. Safe precisely because it is a path
+  # and not a secret: nothing is lost by it appearing in `docker inspect`.
+  DOCKER_FLAGS+=("--env" "CODE_NOTIFY_SPOOL=${_PI_STATE_TARGET}/.code-notify/$$")
+
+  CODE_NOTIFY_RELAY_SESSION_PID=$$ code-notify relay "${_PI_VARIANT:-pi}" "${_CN_SPOOL_HOST}" \
+    < /dev/null > /dev/null 2>&1 &
+  _CN_RELAY_PID=$!
+}
+
+# Every step tolerates failure (|| true): this runs from an EXIT trap under
+# `set -e`, where a relay that already exited would otherwise turn a clean
+# session into a non-zero exit.
+_cn_relay_stop() {
+  if [[ -n "${_CN_RELAY_PID}" ]]; then
+    kill "${_CN_RELAY_PID}" 2> /dev/null || true
+    # The relay retires the tmux running indicator on SIGTERM; give it that
+    # moment before this shell exits.
+    wait "${_CN_RELAY_PID}" 2> /dev/null || true
+  fi
+  if [[ -n "${_CN_SPOOL_HOST}" ]]; then
+    rm -rf "${_CN_SPOOL_HOST}" 2> /dev/null || true
+    # Non-recursive on purpose: it removes the shared parent only once the last
+    # concurrent session is gone, and fails harmlessly while others are live.
+    rmdir "$(dirname "${_CN_SPOOL_HOST}")" 2> /dev/null || true
+  fi
+  return 0
+}
+
 # Git identity: mount ~/.gitconfig read-only. Opt out with PI_NO_GITCONFIG=1.
 # Credential helpers (e.g. osxkeychain) are unavailable; git falls back to prompting.
 if [[ -z "${PI_NO_GITCONFIG:-}" && -f "${HOME}/.gitconfig" ]]; then

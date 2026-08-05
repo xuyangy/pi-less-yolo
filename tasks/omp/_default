@@ -13,10 +13,17 @@ source "$(dirname "$0")/../pi/_docker_flags"
 DOCKER_FLAGS+=("--interactive")
 [ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
 
+# Same shape as the pi task: one trap for both teardowns (a second `trap ...
+# EXIT` replaces rather than adds), and the relay stop sits outside the tmux
+# guard because toasts fire without tmux too.
 if [ -n "${TMUX:-}" ]; then
   tmux set-option -p allow-passthrough on 2>/dev/null || true
-  trap 'tmux set-option -p allow-passthrough off 2>/dev/null || true' EXIT
+  trap '_cn_relay_stop; tmux set-option -p allow-passthrough off 2>/dev/null || true' EXIT
+else
+  trap '_cn_relay_stop' EXIT
 fi
+
+_cn_relay_start
 
 OMP_ARGS=()
 if [[ -z "${PI_NO_CONTAINER_PROMPT:-}" ]]; then

@@ -14,4 +14,9 @@ source "$(dirname "$0")/_docker_flags"
 DOCKER_FLAGS+=("--interactive")
 [ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
 
+# A read-only session is still an agent session, so it gets the code-notify
+# bridge like the default task. See _docker_flags.
+trap '_cn_relay_stop' EXIT
+_cn_relay_start
+
 "${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" --tools read,grep,find,ls "$@"

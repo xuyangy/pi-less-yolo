@@ -13,10 +13,18 @@ source "$(dirname "$0")/_docker_flags"
 DOCKER_FLAGS+=("--interactive")
 [ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
 
+# One trap for both teardowns: a second `trap ... EXIT` would silently replace
+# this one rather than adding to it. The relay is stopped outside the tmux
+# guard because notifications still fire without tmux — only the badge and
+# spinner need a pane.
 if [ -n "${TMUX:-}" ]; then
   tmux set-option -p allow-passthrough on 2>/dev/null || true
-  trap 'tmux set-option -p allow-passthrough off 2>/dev/null || true' EXIT
+  trap '_cn_relay_stop; tmux set-option -p allow-passthrough off 2>/dev/null || true' EXIT
+else
+  trap '_cn_relay_stop' EXIT
 fi
+
+_cn_relay_start
 
 PI_ARGS=()
 if [[ -z "${PI_NO_CONTAINER_PROMPT:-}" ]]; then
