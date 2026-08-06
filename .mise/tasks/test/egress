@@ -64,6 +64,52 @@ export PI_EGRESS_ALLOW="example.com"
 _pi_egress_start > /dev/null 2>&1
 trap '_pi_egress_stop' EXIT
 
+# The generated config must be readable by the sidecar's UID (65532), which is
+# not the invoking user. mktemp -d is 0700, and on Linux a bind mount passes
+# host mode and ownership straight through, so without an explicit chmod
+# tinyproxy cannot read its config and the proxy exits on startup. Docker
+# Desktop on macOS remaps ownership and hides this, so assert the host-side mode
+# rather than trying to observe the failure — that check holds on every platform.
+# Read the rwx string rather than an octal mode: `stat` takes -c on GNU and -f on
+# BSD, and each silently means something else to the other. /bin/ls bypasses any
+# `ls` alias on the host.
+perms_of() { /bin/ls -ld "$1" | cut -c1-10; }
+
+dir_perms=$(perms_of "${_PI_EGRESS_CONFDIR}")
+if [[ "${dir_perms}" == ???????r?x ]]; then
+  echo "  OK proxy config dir is world-traversable (${dir_perms})"
+else
+  echo "  FAIL proxy config dir is ${dir_perms}; the sidecar UID cannot traverse it"
+  failures=$((failures + 1))
+fi
+
+for f in tinyproxy.conf filter; do
+  f_perms=$(perms_of "${_PI_EGRESS_CONFDIR}/${f}")
+  if [[ "${f_perms}" != ???????r?? ]]; then
+    echo "  FAIL ${f} is ${f_perms}; the sidecar UID cannot read it"
+    failures=$((failures + 1))
+  fi
+done
+
+# The proxy must still be running: a config it cannot read makes it exit at once,
+# which would otherwise only surface as confusing connection failures below.
+if [ -n "$("${DOCKER_CMD}" ps -q --filter "name=${_PI_EGRESS_CONTAINER}")" ]; then
+  echo "  OK proxy container is still running after startup"
+else
+  echo "  FAIL proxy container exited on startup"
+  failures=$((failures + 1))
+fi
+
+# Creating a network that already exists must not abort: two first-time sessions
+# can race, and the loser's "already exists" would otherwise kill the run. The
+# subshell contains the `exit 1` that ensure_network uses on real failure.
+if ( _pi_egress_ensure_network "${_PI_EGRESS_NET_INTERNAL}" --internal ); then
+  echo "  OK re-creating an existing network is tolerated"
+else
+  echo "  FAIL ensure_network aborted on an existing network"
+  failures=$((failures + 1))
+fi
+
 # Asserts on curl's exit status, not the HTTP code: a blocked request never
 # gets a response, and an allowed one may legitimately answer 401 (no API key).
 check() {

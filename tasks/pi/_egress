@@ -133,6 +133,22 @@ _pi_egress_to_regex() {
   printf '(^|\\.)%s$\n' "${host}"
 }
 
+# Create a shared egress network if it is missing, tolerating a concurrent
+# session that creates it first. Two first-time sessions can both see it absent
+# and then race on `network create`; the loser gets an "already exists" error,
+# which would abort the caller under `set -e` even though the network is now
+# perfectly usable. Re-inspect instead of trusting the create's exit status.
+# Extra arguments are passed to `network create` (e.g. --internal).
+_pi_egress_ensure_network() {
+  local name="$1"
+  shift
+  "${DOCKER_CMD}" network inspect "${name}" > /dev/null 2>&1 && return 0
+  "${DOCKER_CMD}" network create "$@" "${name}" > /dev/null 2>&1 && return 0
+  "${DOCKER_CMD}" network inspect "${name}" > /dev/null 2>&1 && return 0
+  echo "error: could not create or find the egress network '${name}'" >&2
+  exit 1
+}
+
 # Validates PI_EGRESS and reports how it interacts with the other knobs.
 # Returns 0 when the proxy should be brought up, 1 when egress is off; exits on
 # a conflict that cannot be resolved. Split out from _pi_egress_start so it
@@ -187,15 +203,26 @@ _pi_egress_start() {
   # Networks are shared across concurrent sessions, so they are created if
   # missing and never torn down. --internal is the load-bearing flag: it is what
   # leaves the agent with no route to anywhere but this proxy.
-  "${DOCKER_CMD}" network inspect "${_PI_EGRESS_NET_INTERNAL}" > /dev/null 2>&1 \
-    || "${DOCKER_CMD}" network create --internal "${_PI_EGRESS_NET_INTERNAL}" > /dev/null
-  "${DOCKER_CMD}" network inspect "${_PI_EGRESS_NET_EXTERNAL}" > /dev/null 2>&1 \
-    || "${DOCKER_CMD}" network create "${_PI_EGRESS_NET_EXTERNAL}" > /dev/null
+  _pi_egress_ensure_network "${_PI_EGRESS_NET_INTERNAL}" --internal
+  _pi_egress_ensure_network "${_PI_EGRESS_NET_EXTERNAL}"
 
   _PI_EGRESS_CONFDIR="$(mktemp -d)" || {
     echo "error: could not create a temporary directory for the egress proxy config" >&2
     exit 1
   }
+
+  # mktemp -d gives 0700 owned by the invoking user, and the sidecar runs as UID
+  # 65532. On Linux a bind mount passes host ownership and mode through
+  # unchanged, so that UID cannot traverse the directory: tinyproxy fails to read
+  # its config and the detached container exits immediately, making every
+  # proxied session fail to connect. (Docker Desktop on macOS remaps ownership
+  # so the container appears to own the mount, which hides this entirely — hence
+  # the explicit chmod rather than relying on local testing.)
+  #
+  # World-readable is fine here: the directory holds a tinyproxy config and a
+  # list of allowed hostnames, no credentials. The files below inherit 0644 from
+  # the same reasoning.
+  chmod 0755 "${_PI_EGRESS_CONFDIR}"
 
   local host count=0
   while IFS= read -r host; do
@@ -235,6 +262,10 @@ FilterCaseSensitive Off
 ConnectPort 443
 ConnectPort 8443
 EOF
+
+  # Same reason as the chmod on the directory: a restrictive umask on the host
+  # would otherwise leave these unreadable by the container's UID on Linux.
+  chmod 0644 "${_PI_EGRESS_CONFDIR}/tinyproxy.conf" "${_PI_EGRESS_CONFDIR}/filter"
 
   # $$ is the launching shell, so concurrent sessions get distinct proxies and
   # one session's teardown cannot kill another's.
