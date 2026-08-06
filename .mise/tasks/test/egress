@@ -2,14 +2,17 @@
 #MISE description="Verify PI_EGRESS=proxy allows the allowlist and blocks everything else, including direct egress"
 set -euo pipefail
 
-source tasks/pi/_runtime
+REPO_ROOT="${MISE_TASK_DIR}/../../.."
+
+# shellcheck source=tasks/pi/_runtime
+source "${REPO_ROOT}/tasks/pi/_runtime"
 
 failures=0
 
 # Preflight starts no containers and needs no network, so these run before the
 # skips below.
 # shellcheck source=tasks/pi/_egress
-source tasks/pi/_egress
+source "${REPO_ROOT}/tasks/pi/_egress"
 
 preflight() {
   # A subshell so an `exit 1` from a conflict check does not end this script.
@@ -52,7 +55,15 @@ if [[ "${DOCKER_CMD}" == "podman" ]]; then
   exit 0
 fi
 
-"${DOCKER_CMD}" image inspect pi-egress:latest > /dev/null 2>&1 || mise run pi:egress-build
+# Run the build task by path rather than as `mise run pi:egress-build`. The pi:
+# and omp: tasks only exist once `mise run install` has registered the tasks/
+# directory globally; CI checks the repo out and never installs, so the task name
+# does not resolve there and this failed with "no task pi:egress-build found".
+# Invoking the script directly reuses its build flags (including the Linux
+# --network=host workaround) without depending on that registration.
+if ! "${DOCKER_CMD}" image inspect pi-egress:latest > /dev/null 2>&1; then
+  MISE_TASK_DIR="${REPO_ROOT}/tasks/pi" bash "${REPO_ROOT}/tasks/pi/egress-build"
+fi
 
 CURL_IMAGE="curlimages/curl:8.11.1"
 "${DOCKER_CMD}" pull -q "${CURL_IMAGE}" > /dev/null
