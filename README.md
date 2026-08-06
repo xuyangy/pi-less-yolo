@@ -110,8 +110,10 @@ alias pi='mise run pi'
 | `mise run pi:shell` | Open a bash shell in the container (same mounts as `pi`) |
 | `mise run pi:upgrade` | Upgrade pi to the latest npm release and rebuild |
 | `mise run pi:health` | Check the setup for common problems |
+| `mise run pi:egress-build` | Build or rebuild the egress proxy image used by `PI_EGRESS=proxy` |
 | `mise run omp` | Run the omp (oh-my-pi) coding agent in the sandboxed container |
 | `mise run omp:readonly` | Run omp with the project directory mounted read-only and write tools disabled |
+| `mise run omp:yolo` | Run omp in yolo mode with the egress allowlist on and a git-recoverability warning |
 | `mise run omp:build` | Build or rebuild the omp container image |
 | `mise run omp:shell` | Open a bash shell in the omp container (same mounts as `omp`) |
 
@@ -137,6 +139,7 @@ under [Security model](#security-model) applies identically to `omp`. What diffe
 | Container `$HOME` | `/home/piuser` | `/home/ompuser` |
 | Version pin | `Dockerfile` | `Dockerfile.omp` |
 | Approval default | n/a | lowered from `yolo` to `write` ([below](#approval-mode)) |
+| Command denylist | n/a | `bash.patterns` in the baked overlay ([below](#safer-yolo-ompyolo)) |
 | Read-only tools | `read,grep,find,ls` | `read,grep,glob,ast_grep` |
 
 State is kept separate on purpose: the two agents use incompatible config formats
@@ -147,17 +150,29 @@ There is no `omp:upgrade` or `omp:health` task — `pi:health` checks the pi set
 only. Bump the omp pins by editing `Dockerfile.omp` (Renovate opens PRs for both
 `@oh-my-pi/*` packages) and running `mise run omp:build`.
 
+> **After an omp upgrade, re-run `mise run test:omp`.** Both the approval floor and the
+> denylist depend on omp internals — the tier semantics in `resolveApproval` and the glob
+> matcher in `bash.ts`, neither of which is a public API. The tests assert the observable
+> behaviour, so a release that changes it fails there rather than silently in a session.
+
 ### Approval mode
 
 omp ships with `tools.approvalMode: yolo`, which auto-approves its `exec` tier —
 shelling out, driving a browser, spawning subagents — with no prompt. This image
 lowers that floor to `write`: reads and writes are still automatic, `exec` prompts.
 
-It is applied as a read-only `PI_CONFIG_FILES` overlay baked into the image, so it
-takes effect without touching your own `config.yml`. Opt back out per session:
+It is applied as a read-only `PI_CONFIG_FILES` overlay baked into the image
+(`omp-hardened.yml`), which also carries a `bash.patterns` denylist for commands with no
+legitimate use in this sandbox. The overlay takes effect without touching your own
+`config.yml` — and **outranks it**: a `config.yml` setting `approvalMode: yolo` and
+`patterns: []` does not override it. That matters because the agent can write to its own
+state directory, so a self-relaxing config would otherwise be one injected command away.
+
+Opt back out per session:
 
 ```bash
-mise run omp -- --yolo                      # upstream behaviour
+mise run omp:yolo                           # yolo, hardened — see below
+mise run omp -- --yolo                      # upstream behaviour, hardened floor only
 mise run omp -- --approval-mode always-ask  # prompt for writes too
 ```
 
@@ -165,6 +180,105 @@ mise run omp -- --approval-mode always-ask  # prompt for writes too
 > `computer`, `eval`, `task` (subagents). Those are not disabled here, but with
 > `exec` gated behind a prompt they cannot fire unattended. The `computer` tool is
 > disabled upstream by default and nothing here enables it.
+
+### Safer yolo (`omp:yolo`)
+
+Yolo with the controls that still function underneath it. Built for **unattended** use —
+you start it and walk away, and it never stops to ask you anything:
+
+```bash
+mise run omp:yolo
+```
+
+**What `--yolo` costs you** is more than skipped prompts. It also disarms omp's own
+`CRITICAL_BASH_PATTERNS` net — those rules return `override: true` with no explicit
+policy, and `resolveApproval` ignores override-based prompts in yolo by design. So
+`rm -rf /` is auto-approved under plain `--yolo`, where `write` would have prompted.
+
+**What still applies**, verified against omp 17.2.7's own resolver:
+
+| | `write` | `yolo` |
+|---|---|---|
+| `tools.approvalMode` floor | exec prompts | ignored |
+| `CRITICAL_BASH_PATTERNS` | prompt | **allow** |
+| `bash.patterns` `deny` | deny | **deny** |
+
+A user-supplied `deny` rule carries an explicit policy, which short-circuits before the
+yolo branch is reached. That is the entire mechanism this task rests on.
+
+**Every rule is `deny`, never `prompt`** — deliberately, and it is what makes unattended
+operation work. Under `--yolo` a `bash.patterns` `prompt` rule is the *only* remaining
+thing that can request approval, so one would stop the session with nobody there to
+answer. In `write` mode a `prompt` rule is a no-op anyway, since bash is exec-tier and
+already prompts for everything. Allow and deny are the only two useful states.
+
+Two files, layered:
+
+| File | Applies to | Contents |
+|---|---|---|
+| `omp-hardened.yml` | every omp task | approval floor, plus denies for what is never legitimate: absolute-path `rm -rf`, `mkfs`, `dd` to a device, `curl … \| sh` |
+| `omp-yolo.yml` | `omp:yolo` only | all of the above, plus what only unattended operation rules out: `git push --force`, `git reset --hard`, history rewrites, and the global installs that persist into `~/.omp` |
+
+`PI_CONFIG_FILES` layering replaces arrays rather than merging them, so `omp-yolo.yml`
+restates every rule; `mise run test:omp` asserts it stays a superset and contains no
+`prompt` rule.
+
+> **The overlay outranks your own config**, which is the point. A `~/.omp/agent/config.yml`
+> setting `patterns: []` and `approvalMode: yolo` does *not* override it — verified. That
+> matters because the agent can write to its own state directory, so a self-relaxing
+> config would otherwise be one injected command away.
+>
+> The flip side: you cannot relax a rule you find too strict from your config either. Edit
+> `omp-yolo.yml` and run `mise run omp:build`, or use `mise run omp -- --yolo` for
+> upstream behaviour with only the hardened floor.
+
+**The task adds two things** on top:
+
+- **The egress allowlist, defaulted on** — `PI_EGRESS=proxy` unless you set it otherwise.
+  This is the only one of the three an injected session cannot argue its way around, since
+  it is enforced by routing rather than by the agent. `PI_EGRESS=off` restores plain yolo.
+  Note it costs you `browser` and `fetch` for anything unlisted; see
+  [Network egress](#network-egress-pi_egress).
+- **A recoverability warning** naming uncommitted changes, unpushed commits, or a missing
+  upstream — the exposure yolo creates that no network boundary can address:
+
+  ```console
+  $ mise run omp:yolo
+  warning: yolo mode can destroy the following irrecoverably:
+           - 16 uncommitted change(s)
+           Commit and push first if you want a fallback.
+  ```
+
+  Warn-only, deliberately. A hard block would be bypassed, and the point is to make the
+  exposure visible at the moment it is accepted.
+
+#### What a block looks like
+
+From an unattended run against a scratch repo — the session continued past both without
+stopping:
+
+```console
+$ mkfs.ext4 /dev/does-not-exist
+Tool "bash" is blocked by user policy.
+To allow: remove "tools.approval.bash: deny" from config.
+
+$ curl -sS --max-time 10 https://ifconfig.me
+curl: (56) CONNECT tunnel failed, response 403
+```
+
+> **That first message is wrong, and it is upstream's.** There is no
+> `tools.approval.bash: deny` in any config here, so following the advice finds nothing to
+> remove. The block came from a `bash.patterns` rule, which omp's resolver reports as
+> `source: "tool"` with `reason: "Blocked by bash pattern: …"` — the runtime takes the
+> user-policy branch instead and discards the reason. Enforcement is correct; only the
+> explanation is misattributed. Check `omp-yolo.yml` for the rule that actually fired.
+
+> **This does not make yolo safe.** The pattern list is glob-matched, case-sensitive, and
+> literal, so `eval`, variable indirection (`R=rm; $R -rf /`), and base64 round-trips all
+> evade it — treat it as a guard against accidents and unsubtle injection, not against a
+> determined adversary. The real boundaries remain the mount, the dropped capabilities,
+> and the egress allowlist. What this task buys is narrower irreversible outcomes and
+> visible reversible ones.
 
 ### Read-only mode (omp)
 
@@ -344,7 +458,7 @@ escalate.
 
 Mounting the directory at its real path (rather than a fixed `/workspace`) means pi's session tracking reflects the actual project path, so each project gets distinct session history.
 
-The agent cannot reach other directories on your host. It can make arbitrary network requests and execute any command available inside the container image.
+The agent cannot reach other directories on your host. By default it can make arbitrary network requests and execute any command available inside the container image — see [Network egress](#network-egress-pi_egress) to put an allowlist in front of the first of those.
 
 **API keys** are passed to the container by name (`--env ANTHROPIC_API_KEY`), not as
 `--env NAME=value`, so key material never appears in the `docker run` command line
@@ -366,6 +480,202 @@ Two different mechanisms are at work here, and they are not equally strong:
 - **`~/.pi/agent` stays writable**, and the restriction to read-only *tools* is enforced by pi in userspace, not by the kernel. The agent dir cannot be mounted `:ro` — pi writes session history there on every run and aborts with `EROFS` if it can't.
 
 So `pi:readonly` gives you a hard guarantee about your source tree and a softer one about everything else. It is a good fit for reading a codebase you don't trust; it is not a containment boundary against a pi bug or a prompt injection that reaches a write path in `/pi-agent`.
+
+### Network egress (`PI_EGRESS`)
+
+Everything else in this repo bounds the agent's **filesystem**. Nothing bounds its
+**network** — the container can reach any host on the internet, and both the source
+tree and the forwarded API keys are readable from inside it. `PI_EGRESS=proxy` puts a
+kernel-enforced allowlist in front of that.
+
+```bash
+mise run pi:egress-build          # one-time, ~10 seconds
+
+PI_EGRESS=proxy mise run pi:readonly
+PI_EGRESS=proxy mise run omp:readonly
+```
+
+**Why this is not just an approval mode.** omp's `tools.approvalMode` and pi's `--tools`
+gate what the *model* may invoke — a userspace check inside the agent process, on
+arguments the model produced. They cannot see anything else running in the container: an
+npm `postinstall` during `pi install`, a `make` recipe under one approved bash call, a
+subprocess three levels down. Those reach the network with no tool call and therefore no
+prompt, at any approval tier. Egress filtering sits outside the agent entirely, so it
+covers code the model never saw.
+
+**Why this is not just `HTTPS_PROXY`.** Proxy environment variables are a convention that
+well-behaved clients honour; `curl --noproxy '*'` ignores them. Here the agent container
+joins a Docker `--internal` network, which has no route off the host at all. The only way
+out is a dual-homed [tinyproxy](https://tinyproxy.github.io/) sidecar that forwards a
+fixed list of hostnames. The env vars are set so clients *find* the proxy; the
+containment comes from there being nowhere else to go. `mise run test:egress` asserts
+exactly that, including two bypass attempts that ignore the proxy entirely.
+
+#### Adding to the allowlist
+
+Defaults cover the model providers whose keys `_docker_flags` forwards (plus their OAuth
+hosts) and the common package registries — npm, PyPI, crates.io, Go, GitHub, GitLab.
+`huggingface.co` is deliberately excluded: it is a general hosting platform rather than
+just an inference endpoint, and `HF_TOKEN` is forwarded for omp, so allowlisting it would
+hand the agent an authenticated, writable destination. Add it to your allow-file if you
+pull models from it. Three ways to extend, applied in order and combined:
+
+```bash
+# 1. Per-session, for a one-off host. Comma, semicolon, or space separated.
+PI_EGRESS_ALLOW="docs.example.com,internal.registry.corp" PI_EGRESS=proxy mise run pi:readonly
+
+# 2. Persistent, one hostname per line, '#' comments allowed.
+mkdir -p ~/.config/pi-less-yolo
+echo "internal.registry.corp" >> ~/.config/pi-less-yolo/egress-allow.txt
+
+# 3. A different file entirely.
+export PI_EGRESS_ALLOW_FILE=/path/to/allow.txt
+```
+
+Entries are plain hostnames, and subdomains are implied: `github.com` also covers
+`api.github.com` and `codeload.github.com`. Matching is anchored, so
+`github.com.attacker.test` does not pass. `PI_EGRESS_NO_DEFAULTS=1` drops the built-in
+list and uses only what you supply.
+
+When something breaks, the proxy says what it refused:
+
+```bash
+docker logs pi-egress-<pid>    # "Proxying refused on filtered domain \"ifconfig.me\""
+```
+
+| Variable | Effect |
+|---|---|
+| `PI_EGRESS` | `proxy` to enable, `off` (default) for today's unrestricted behaviour |
+| `PI_EGRESS_ALLOW` | Extra hostnames for this session |
+| `PI_EGRESS_ALLOW_FILE` | Path to an allow-file (default `~/.config/pi-less-yolo/egress-allow.txt`) |
+| `PI_EGRESS_NO_DEFAULTS` | `1` drops the built-in defaults |
+| `PI_EGRESS_LOG_LEVEL` | tinyproxy log level (default `Notice`) |
+
+#### Recipe: pin an exact allowlist
+
+`PI_EGRESS_NO_DEFAULTS=1` plus your own file gives you a list that is exactly what you
+wrote — nothing inherited, so a default added here in a later release cannot silently
+widen your policy. That is the reason to prefer it over editing around the defaults.
+
+**1. Seed from the current defaults**, so you start from a known-good list rather than a
+blank file. Run this *before* setting `PI_EGRESS_NO_DEFAULTS=1`, or you will write an
+empty file:
+
+```bash
+mkdir -p ~/.config/pi-less-yolo
+bash -c 'source /path/to/pi-less-yolo/tasks/pi/_egress; _pi_egress_allowlist' \
+  > ~/.config/pi-less-yolo/egress-allow.txt
+```
+
+**2. Trim it.** The file takes `#` comments, so comment lines out rather than deleting
+them while you find the floor. The true minimum is your provider's API host *and* its
+OAuth host — for Anthropic:
+
+```
+api.anthropic.com        # API calls
+platform.claude.com      # OAuth token refresh; omitting this fails as "token has expired"
+# claude.ai              # only needed to re-run the browser authorize flow
+```
+
+Then add whatever your projects actually fetch — `registry.npmjs.org`, `github.com`,
+`pypi.org`.
+
+**3. Enable it**, in your shell profile to make it standing:
+
+```bash
+export PI_EGRESS_NO_DEFAULTS=1
+export PI_EGRESS=proxy
+```
+
+**4. Iterate on failures.** The proxy names what it refused:
+
+```bash
+docker logs "$(docker ps -q --filter name=pi-egress-)"
+# NOTICE  Proxying refused on filtered domain "ifconfig.me"
+```
+
+> **The log dies with the session.** Teardown does `docker rm -f`, so read it from a
+> second pane while the session is still up. For a `-p` one-shot that fails, the evidence
+> is already gone — re-run with a tail attached.
+
+> **Exported variables do not apply everywhere.** Only the `readonly` tasks honour
+> `PI_EGRESS`. With the exports above standing in your profile, `mise run pi` and
+> `mise run omp` ignore them silently — the variables persist across sessions, the
+> filtering does not, and nothing says which is which. Use `mise run pi:readonly` or
+> `mise run omp:readonly` for a proxied session.
+
+#### Downsides
+
+Turning this on costs you real functionality. Read this before making it standing policy.
+
+**What stops working**
+
+- **SSH, entirely.** The internal network has no route to port 22 and SSH cannot traverse
+  an HTTP proxy, so git-over-SSH fails and `PI_SSH_AGENT=1` becomes inert. Setting both
+  warns rather than aborting: the conflict is functional, not a security downgrade — the
+  forwarded agent socket is still mounted, but with no reachable SSH server the exposure
+  it normally carries is moot. Use HTTPS remotes, or drop `PI_EGRESS`.
+- **Most of omp's `browser`, `fetch`, and web search.** Arbitrary sites are not on the
+  allowlist, so the tools that most distinguish omp from pi can reach very little. If
+  those are why you run omp, this is the largest cost here.
+- **Dependency fetches beyond the allowlist** — private registries, internal mirrors,
+  vendored URLs. Each needs an allow-file entry.
+- **`PI_LOCAL_MODELS=1`**, which shares the host network namespace and would bypass the
+  proxy entirely; setting both is a hard error rather than a silent downgrade.
+
+**The error messages are misleading.** The container cannot resolve external names at all
+— Docker's embedded DNS serves only container names — so a blocked host surfaces inside
+the agent as `Could not resolve host`, not as a policy denial. It reads like broken
+networking. Check the proxy log before debugging anything else:
+
+```bash
+docker logs "$(docker ps -q --filter name=pi-egress-)"
+```
+
+**What it does not protect against**
+
+> **The allowlist is itself a channel.** `github.com` is on it so `git push` works — which
+> means `git push` to someone else's repo also works. The model provider must be
+> reachable, and data can leave inside a prompt. This narrows the exit; it does not seal
+> it.
+
+- **Anything local.** Deletion, overwriting, or history rewriting inside the mounted
+  directory is untouched by a network boundary.
+- **Persistence, which escapes in time.** Packages installed into `~/.pi/agent` or
+  `~/.omp` persist on the host and load in *every* later session — including ones run
+  without the proxy. A filtered session can plant something that runs unfiltered later.
+- **False confidence, which is the subtlest cost.** Closing the exfiltration path
+  convincingly makes it tempting to relax approval modes in exchange. That trades a
+  control covering local destruction for one that does not.
+
+**Operational**
+
+- **Only the `readonly` tasks honour `PI_EGRESS`** so far. `mise run pi` and `mise run omp`
+  ignore it silently — see the warning in the [recipe](#recipe-pin-an-exact-allowlist).
+  The read-only tasks are the "read a codebase I don't trust" path — highest injection
+  risk, lowest need for network access — so they are where the allowlist earns its
+  friction first.
+- **The default is `off`**, so nothing changes unless you ask for it.
+- **A proxy container per session**, plus two networks that are created once and left in
+  place for concurrent sessions. Remove them with
+  `docker network rm pi-egress-internal pi-egress-external`.
+- **The proxy log dies with the session** — teardown does `docker rm -f`, so a failed
+  one-shot leaves no evidence behind.
+- **Podman is untested** for this path, though `--internal` networks are supported there.
+  `mise run test:egress` skips there rather than reporting a failure.
+
+**Deliberate design limits**
+
+- **No project-local allow-file is read.** A `.pi-egress-allow` inside the mounted
+  directory would be writable by the agent, letting an injected session widen its own
+  allowlist for the next run.
+- **CONNECT is limited to ports 443 and 8443**, so the proxy cannot tunnel to arbitrary
+  services on an allowlisted host.
+- **Filtering is on the CONNECT hostname**, with no TLS interception — nothing decrypts
+  your traffic, and no custom CA is installed. The cost is that per-path rules are
+  impossible: the proxy can allow `github.com`, but not "only this owner's repos". Scope
+  the credential instead — a token that cannot write elsewhere is enforced by the server,
+  not by us.
 
 ### Pi packages
 
@@ -396,6 +706,11 @@ PI_SSH_AGENT=1 mise run pi
 ```
 
 Or export it in your shell profile to make it permanent.
+
+> **Does not combine with `PI_EGRESS=proxy`.** SSH cannot traverse an HTTP proxy, and the
+> internal network has no route to port 22, so git-over-SSH fails under the egress
+> allowlist. Setting both warns and continues — use HTTPS remotes for those sessions. See
+> [Network egress](#network-egress-pi_egress).
 
 > **Security note:** a compromised container can authenticate as you to any SSH server your agent has loaded. Review loaded keys with `ssh-add -l` before enabling. On macOS, Docker Desktop exposes the host SSH agent via a fixed path inside the VM. The socket is created root-owned with restricted permissions; the root group (GID 0) is added as a supplementary group so the non-root container user can access it — no additional setup is needed. On Linux, ensure `ssh-agent` is running and `SSH_AUTH_SOCK` is exported in your shell environment.
 

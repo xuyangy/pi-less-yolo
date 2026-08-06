@@ -1,0 +1,88 @@
+# Managed by pi-less-yolo. Layered on top of omp-hardened.yml by `mise run
+# omp:yolo`, via PI_CONFIG_FILES=/etc/omp/hardened.yml:/etc/omp/yolo.yml.
+#
+# WHY THIS RESTATES THE WHOLE LIST
+#
+# PI_CONFIG_FILES layering merges scalars but REPLACES arrays — a later file's
+# `bash.patterns` wins outright rather than appending. So this cannot be a
+# delta; it has to carry every rule. `mise run test:omp` asserts that it remains
+# a superset of omp-hardened.yml, so the two cannot drift apart silently.
+#
+# WHY EVERYTHING IS `deny`
+#
+# This file is for unattended yolo — started and walked away from. Under
+# `--yolo` the only remaining source of an approval prompt is a bash.patterns
+# `prompt` rule (bash.ts:567 is the sole tool returning an explicit
+# `policy: "prompt"`), so a prompt here would stop the session with nobody there
+# to answer. Allow or deny are the only two useful states; every rule is deny.
+#
+# The first group is omp-hardened.yml verbatim. The second is what unattended
+# operation adds: commands that are legitimate when a human is watching and
+# unacceptable when one is not.
+#
+# TOO STRICT? These rules cannot be relaxed from your own config.yml — the
+# overlay deliberately outranks it. Edit this file and re-run `mise run
+# omp:build`, or use `mise run omp -- --yolo` for upstream behaviour with only
+# the hardened floor.
+bash:
+  patterns:
+    # --- identical to omp-hardened.yml -------------------------------------
+    - match: "*rm -rf /*"
+      approval: deny
+    - match: "*rm -fr /*"
+      approval: deny
+    - match: "*rm -r -f /*"
+      approval: deny
+    - match: "*rm -f -r /*"
+      approval: deny
+    - match: "*mkfs*"
+      approval: deny
+    - match: "*dd if=* of=/dev/*"
+      approval: deny
+    - match: "*shred /dev/*"
+      approval: deny
+    - match: "*curl* | sh*"
+      approval: deny
+    - match: "*curl* | bash*"
+      approval: deny
+    - match: "*wget* | sh*"
+      approval: deny
+    - match: "*wget* | bash*"
+      approval: deny
+
+    # --- unattended-only ---------------------------------------------------
+
+    # Force-push and history rewriting destroy the remote copy. That matters
+    # more than usual here: omp:yolo warns about uncommitted and unpushed work
+    # on the premise that the remote is the fallback, and these are exactly the
+    # commands that remove the fallback.
+    - match: "*git push* --force*"
+      approval: deny
+    - match: "*git push* -f*"
+      approval: deny
+    - match: "*git filter-branch*"
+      approval: deny
+    - match: "*git filter-repo*"
+      approval: deny
+
+    # Discards uncommitted work outright. Recoverable only if the change was
+    # committed first, which is what the task's startup warning is about.
+    - match: "*git reset --hard*"
+      approval: deny
+
+    # Persistence. Anything installed into the mounted state directory outlives
+    # the container and loads on every later session — including sessions run
+    # without the egress proxy, and including plain `mise run omp`. This is the
+    # one vector that escapes the sandbox in time rather than in space.
+    - match: "*omp install*"
+      approval: deny
+    - match: "*npm install -g*"
+      approval: deny
+    - match: "*bun install -g*"
+      approval: deny
+
+    # Recursive deletion of the container home, where the state mount lives.
+    - match: "*rm -rf ~*"
+      approval: deny
+    - match: "*rm -rf $HOME*"
+      approval: deny

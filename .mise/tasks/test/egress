@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#MISE description="Verify PI_EGRESS=proxy allows the allowlist and blocks everything else, including direct egress"
+set -euo pipefail
+
+source tasks/pi/_runtime
+
+failures=0
+
+# Preflight starts no containers and needs no network, so these run before the
+# skips below.
+# shellcheck source=tasks/pi/_egress
+source tasks/pi/_egress
+
+preflight() {
+  # A subshell so an `exit 1` from a conflict check does not end this script.
+  ( PI_EGRESS="$1" PI_LOCAL_MODELS="$2" PI_SSH_AGENT="$3" _pi_egress_preflight ) 2>&1
+}
+
+expect_preflight() {
+  local desc="$1" pattern="$2"; shift 2
+  local out
+  out="$(preflight "$@" || true)"
+  if grep -qE "${pattern}" <<< "${out}" || { [[ -z "${pattern}" ]] && [[ -z "${out}" ]]; }; then
+    echo "  OK ${desc}"
+  else
+    echo "  FAIL ${desc} (output: ${out:-<empty>})"
+    failures=$((failures + 1))
+  fi
+}
+
+expect_preflight "PI_LOCAL_MODELS conflict is a hard error" "cannot be combined" proxy 1 ""
+expect_preflight "PI_SSH_AGENT conflict warns"              "PI_SSH_AGENT=1 has no effect" proxy "" 1
+expect_preflight "unknown mode is rejected"                 "is not a known mode" bogus "" ""
+expect_preflight "proxy alone is silent"                    "" proxy "" ""
+expect_preflight "egress off is silent"                     "" off "" 1
+
+# The rest needs network access to a known-good host, so it is skipped when the
+# runner has none rather than reported as a failure.
+if ! curl -s --max-time 10 -o /dev/null https://example.com/; then
+  echo "  SKIP no network access from the host"
+  [ "${failures}" -eq 0 ] || { echo "FAIL: ${failures} egress check(s) failed"; exit 1; }
+  exit 0
+fi
+
+# The --internal network and the sidecar's second attachment are only verified
+# on Docker so far; the README says as much. Skipping is honest, whereas a red
+# CI run on the podman matrix would imply the feature is broken rather than
+# unverified.
+if [[ "${DOCKER_CMD}" == "podman" ]]; then
+  echo "  SKIP egress proxy is not verified on podman"
+  [ "${failures}" -eq 0 ] || { echo "FAIL: ${failures} egress check(s) failed"; exit 1; }
+  exit 0
+fi
+
+"${DOCKER_CMD}" image inspect pi-egress:latest > /dev/null 2>&1 || mise run pi:egress-build
+
+CURL_IMAGE="curlimages/curl:8.11.1"
+"${DOCKER_CMD}" pull -q "${CURL_IMAGE}" > /dev/null
+
+DOCKER_FLAGS=()
+export PI_EGRESS=proxy
+export PI_EGRESS_ALLOW="example.com"
+
+_pi_egress_start > /dev/null 2>&1
+trap '_pi_egress_stop' EXIT
+
+# Asserts on curl's exit status, not the HTTP code: a blocked request never
+# gets a response, and an allowed one may legitimately answer 401 (no API key).
+check() {
+  local desc="$1" expect="$2"; shift 2
+  local rc=0
+  "${DOCKER_CMD}" run --rm "${DOCKER_FLAGS[@]}" "${CURL_IMAGE}" "$@" > /dev/null 2>&1 || rc=$?
+  if [[ "${expect}" == "ok" && "${rc}" -eq 0 ]] || [[ "${expect}" == "fail" && "${rc}" -ne 0 ]]; then
+    echo "  OK ${desc}"
+  else
+    echo "  FAIL ${desc} (rc=${rc}, expected ${expect})"
+    failures=$((failures + 1))
+  fi
+}
+
+check "allowlisted host reachable through the proxy"  ok   -s --max-time 25 https://example.com/
+check "default model provider reachable"              ok   -s --max-time 25 https://api.anthropic.com/v1/models
+check "unlisted host blocked"                         fail -s --max-time 25 https://ifconfig.me/
+check "suffix-spoofed host blocked"                   fail -s --max-time 20 https://example.com.egress-test.invalid/
+check "CONNECT to a non-TLS port blocked"             fail -s --max-time 20 https://example.com:8080/
+
+# The load-bearing ones: --internal means there is no route out even for a
+# client that ignores the proxy env vars entirely.
+check "direct egress bypassing the proxy blocked"     fail -s --max-time 15 --noproxy '*' https://example.com/
+check "direct egress to a raw IP blocked"             fail -s --max-time 15 --noproxy '*' http://1.1.1.1/
+
+[ "${failures}" -eq 0 ] || { echo "FAIL: ${failures} egress check(s) failed"; exit 1; }
+echo "  OK egress allowlist enforced"

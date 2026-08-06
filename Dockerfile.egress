@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+
+# Egress proxy sidecar for PI_EGRESS=proxy. See tasks/pi/_egress.
+#
+# The agent container runs on a `--internal` Docker network, which has no route
+# off the host. This container is dual-homed — internal plus a normal bridge —
+# so it is the only path out, and it forwards only the hostnames in the
+# generated allowlist.
+#
+# No config is baked in. tasks/pi/_egress writes tinyproxy.conf and the filter
+# file on the host and bind-mounts them read-only, so adding a domain never
+# requires rebuilding this image.
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+
+# Unpinned by convention, like the apk/apt installs in the sibling Dockerfiles:
+# the base image is pinned by digest, and an exact apk revision would break the
+# build outright the moment Alpine publishes a newer one and drops the old from
+# its index (`unable to select packages`). See .hadolint.yaml (DL3018).
+RUN apk add --no-cache tinyproxy
+
+# Same posture as the agent images: fail closed to a non-root UID even on a bare
+# `docker run`. The run helper passes --cap-drop=ALL --no-new-privileges too.
+# tinyproxy listens on 8888, above the privileged range, so it needs no caps —
+# and the generated config omits the User/Group directives it cannot honour as
+# a non-root process.
+USER 65532:65532
+
+ENTRYPOINT ["tinyproxy", "-d", "-c", "/etc/pi-egress/tinyproxy.conf"]

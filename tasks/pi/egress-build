@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#MISE description="Build (or rebuild) the egress proxy image used by PI_EGRESS=proxy"
+set -euo pipefail
+
+REPO_ROOT="${MISE_TASK_DIR}/../.."
+
+# Same Linux DNS workaround as pi:build; see the comment there.
+DOCKER_CMD="${PI_CONTAINER_RUNTIME:-docker}"
+BUILD_FLAGS=()
+[[ "$(uname -s)" == "Linux" ]] && BUILD_FLAGS+=("--network=host")
+
+# Serves both agents — the proxy is agent-agnostic, so there is no omp variant.
+"${DOCKER_CMD}" build "${BUILD_FLAGS[@]}" \
+  -f "${REPO_ROOT}/Dockerfile.egress" \
+  -t "pi-egress:latest" \
+  "${REPO_ROOT}"
+
+echo "Image 'pi-egress:latest' built successfully."

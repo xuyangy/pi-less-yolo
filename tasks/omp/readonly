@@ -14,8 +14,15 @@ DOCKER_FLAGS+=("--interactive")
 
 # A read-only session is still an agent session, so it gets the code-notify
 # bridge like the default task. See _docker_flags.
-trap '_cn_relay_stop' EXIT
+#
+# PI_EGRESS is honoured here and not in the default task on purpose: this is the
+# "read a codebase I don't trust" path, so it carries the highest injection risk
+# and the lowest need for network access — the best place for the allowlist to
+# earn its friction. One trap for both teardowns; a second `trap ... EXIT` would
+# replace rather than add.
+trap '_cn_relay_stop; _pi_egress_stop' EXIT
 _cn_relay_start
+_pi_egress_start
 
 # Two layers, and they are not equally strong (same caveat as pi:readonly):
 #   - the :ro mount on the project directory is kernel-enforced;

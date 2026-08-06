@@ -2,4 +2,4 @@
 #MISE description="Run hadolint on the Dockerfiles"
 set -euo pipefail
 
-hadolint Dockerfile Dockerfile.omp
+hadolint Dockerfile Dockerfile.omp Dockerfile.egress

@@ -1,0 +1,75 @@
+# Managed by pi-less-yolo. Baked into the omp image and applied via
+# PI_CONFIG_FILES as a read-only overlay, so it takes effect without touching
+# the user's own config.yml — and cannot be undone by it. Verified: a config.yml
+# setting `patterns: []` and `approvalMode: yolo` does not override this file,
+# which matters because the agent can write to its own state directory.
+#
+# APPROVAL MODE
+#
+# omp defaults to `yolo`, which auto-approves the `exec` tier — shelling out,
+# driving a browser, spawning subagents — with no prompt. This lowers that floor
+# to `write`: read and write are still automatic, exec prompts. A session can opt
+# back out with `omp --yolo`, or use `mise run omp:yolo` for a hardened version.
+tools:
+  approvalMode: write
+
+# BASH PATTERNS
+#
+# The part that still applies under `--yolo`, which is why the list exists.
+# Verified against omp 17.2.7's own resolveApproval:
+#
+#   bash.patterns deny     -> deny   in both write and yolo
+#   CRITICAL_BASH_PATTERNS -> prompt in write, but ALLOW in yolo
+#
+# omp's built-in critical-command net returns `override: true` with no policy,
+# and resolveApproval's yolo branch ignores override-based prompts by design
+# ("In yolo mode, override-based tool prompts are ignored"). A user-supplied deny
+# rule carries an explicit policy, which short-circuits before that branch.
+#
+# DENY ONLY, DELIBERATELY. A `prompt` rule would be a no-op in write mode (bash
+# is exec-tier, so it already prompts for everything) and a hang under yolo,
+# where nobody is watching to answer it. The two useful states are allow and
+# deny. omp-yolo.yml extends this list for unattended runs.
+#
+# SYNTAX: globs, not regex. `*` is the only wildcard; every other character is
+# literal. Matching is anchored, whitespace-collapsed, CASE-SENSITIVE, and
+# applied to the whole command *and* to each segment of a compound one, so
+# `cd /tmp && rm -rf /` is caught.
+#
+# NOT AIRTIGHT, and not meant to be. Literal matching means `eval`, variable
+# indirection (`R=rm; $R -rf /`), base64 round-trips, and unusual spellings all
+# evade it. Treat it as a guard against accidents and unsubtle prompt injection,
+# not as a boundary against a determined adversary. The boundaries in this repo
+# are the read-only mount, the dropped capabilities, and the egress allowlist.
+bash:
+  patterns:
+    # Recursive destruction rooted at an absolute path. Leading `*` so
+    # `sudo rm -rf /`, `/bin/rm -rf /home`, and `time rm -rf /` all match.
+    - match: "*rm -rf /*"
+      approval: deny
+    - match: "*rm -fr /*"
+      approval: deny
+    - match: "*rm -r -f /*"
+      approval: deny
+    - match: "*rm -f -r /*"
+      approval: deny
+
+    # Device and filesystem destruction. The container is ephemeral, but these
+    # are never a legitimate thing for a coding agent to reach for.
+    - match: "*mkfs*"
+      approval: deny
+    - match: "*dd if=* of=/dev/*"
+      approval: deny
+    - match: "*shred /dev/*"
+      approval: deny
+
+    # Remote-fetch-then-execute. The egress allowlist limits *where* this can
+    # fetch from; this limits the shape regardless of host.
+    - match: "*curl* | sh*"
+      approval: deny
+    - match: "*curl* | bash*"
+      approval: deny
+    - match: "*wget* | sh*"
+      approval: deny
+    - match: "*wget* | bash*"
+      approval: deny

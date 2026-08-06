@@ -1,0 +1,289 @@
+# Enforced egress allowlisting for the agent containers. Source this file; do
+# not execute directly. Sourced from _docker_flags, so both agents share it.
+#
+# WHY THIS EXISTS
+#
+# Approval modes (omp's `tools.approvalMode`, pi's `--tools`) gate what the
+# *model* may invoke. They are a userspace check inside the agent process, on
+# arguments the model produced. They cannot see anything else in the container:
+# an npm `postinstall` during `pi install`, a `make` recipe under one approved
+# bash call, a subprocess three levels down. All of those reach the network with
+# no tool call and therefore no prompt, in any approval mode.
+#
+# This closes that gap outside the agent entirely. With PI_EGRESS=proxy the
+# agent container joins a Docker `--internal` network, which has no route off
+# the host — that is enforced by the kernel's routing tables, not by a setting
+# the agent can reach. The only way out is an HTTP proxy on a second network
+# that forwards a fixed list of hostnames.
+#
+# Setting HTTPS_PROXY alone would NOT do this: proxy env vars are a convention
+# that well-behaved clients honour, and `curl --noproxy '*'` ignores them. The
+# env vars below are only there so clients find the proxy; the containment comes
+# from there being nowhere else to go.
+#
+# WHAT IT DOES NOT DO
+#
+# The allowlist is itself a channel. github.com is on it so `git push` works —
+# which means `git push` to someone else's repo also works. The model provider
+# must be reachable, and data can leave inside a prompt. This narrows the exit;
+# it does not seal it.
+
+# Model providers first (without one the session cannot start), then package
+# registries. Entries are plain hostnames; a subdomain match is implied, so
+# `github.com` also covers `api.github.com`.
+_PI_EGRESS_DEFAULT_ALLOW=(
+  # Model providers. Mirrors the API-key list in _docker_flags — a key that is
+  # forwarded but whose endpoint is blocked would fail confusingly.
+  api.anthropic.com
+
+  # OAuth hosts, which are NOT the same as the API hosts. Both agents support
+  # ANTHROPIC_OAUTH_TOKEN, and pi-anthropic-oauth refreshes against
+  # platform.claude.com/v1/oauth/token — allowing only api.anthropic.com fails
+  # every session with "Token refresh failed and token has expired", which reads
+  # like an expired credential rather than a blocked host.
+  platform.claude.com
+  claude.ai
+  console.anthropic.com
+
+  api.openai.com
+  openai.azure.com
+  generativelanguage.googleapis.com
+  aiplatform.googleapis.com
+  api.mistral.ai
+  api.groq.com
+  api.cerebras.ai
+  api.x.ai
+  openrouter.ai
+  ai-gateway.vercel.sh
+  api.z.ai
+  opencode.ai
+  api.moonshot.cn
+  api.minimax.chat
+  api.minimaxi.com
+  api.deepseek.com
+  api.together.xyz
+  api.fireworks.ai
+  integrate.api.nvidia.com
+
+  # Deliberately NOT here: huggingface.co. It is a general hosting platform, not
+  # just an inference endpoint, and _docker_flags forwards HF_TOKEN and
+  # HUGGINGFACE_HUB_TOKEN for the omp variant — so allowlisting it would hand
+  # the agent a writable, authenticated destination and a working exfiltration
+  # path. The tokens are still forwarded (they matter when PI_EGRESS is off);
+  # add `huggingface.co` to your allow-file if you pull models from it.
+
+  # Package registries. Both agents install extensions at runtime, and projects
+  # need their own dependency fetches to work.
+  registry.npmjs.org
+  registry.yarnpkg.com
+  github.com
+  githubusercontent.com
+  githubassets.com
+  gitlab.com
+  pypi.org
+  files.pythonhosted.org
+  crates.io
+  static.crates.io
+  proxy.golang.org
+  sum.golang.org
+)
+
+_PI_EGRESS_NET_INTERNAL="pi-egress-internal"
+_PI_EGRESS_NET_EXTERNAL="pi-egress-external"
+_PI_EGRESS_IMAGE="pi-egress:latest"
+_PI_EGRESS_PORT=8888
+
+_PI_EGRESS_CONTAINER=""
+_PI_EGRESS_CONFDIR=""
+
+# Emit the allowlist, one hostname per line: built-in defaults (unless
+# PI_EGRESS_NO_DEFAULTS=1), then the allow-file, then PI_EGRESS_ALLOW.
+_pi_egress_allowlist() {
+  local file entry
+
+  if [[ -z "${PI_EGRESS_NO_DEFAULTS:-}" ]]; then
+    printf '%s\n' "${_PI_EGRESS_DEFAULT_ALLOW[@]}"
+  fi
+
+  file="${PI_EGRESS_ALLOW_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/pi-less-yolo/egress-allow.txt}"
+  if [[ -f "${file}" ]]; then
+    # Strip comments and surrounding whitespace; skip blank lines.
+    while IFS= read -r entry || [[ -n "${entry}" ]]; do
+      entry="${entry%%#*}"
+      entry="${entry#"${entry%%[![:space:]]*}"}"
+      entry="${entry%"${entry##*[![:space:]]}"}"
+      [[ -n "${entry}" ]] && printf '%s\n' "${entry}"
+    done < "${file}"
+  fi
+
+  # Accept comma, semicolon, or whitespace separation so any habit works.
+  if [[ -n "${PI_EGRESS_ALLOW:-}" ]]; then
+    printf '%s\n' "${PI_EGRESS_ALLOW}" | tr ',;' '  ' | tr -s '[:space:]' '\n' | grep -v '^$' || true
+  fi
+}
+
+# Turn a hostname into an anchored POSIX-extended regex for tinyproxy's filter
+# file, matching the host itself and any subdomain of it. Dots are escaped so
+# `api.example.com` cannot be matched by `apiXexample.com`, and the trailing
+# anchor is what stops `github.com.evil.test` from passing.
+_pi_egress_to_regex() {
+  local host="$1"
+  host="${host#.}"
+  host="${host//./\\.}"
+  printf '(^|\\.)%s$\n' "${host}"
+}
+
+# Validates PI_EGRESS and reports how it interacts with the other knobs.
+# Returns 0 when the proxy should be brought up, 1 when egress is off; exits on
+# a conflict that cannot be resolved. Split out from _pi_egress_start so it
+# starts no containers and can be exercised directly by the tests.
+_pi_egress_preflight() {
+  local mode="${PI_EGRESS:-off}"
+
+  case "${mode}" in
+    off | "") return 1 ;;
+    proxy) ;;
+    *)
+      echo "error: PI_EGRESS='${mode}' is not a known mode (expected 'proxy' or 'off')" >&2
+      exit 1
+      ;;
+  esac
+
+  # --network=host and --network=<internal> are mutually exclusive, and host
+  # networking would hand the agent unrestricted egress anyway — silently
+  # winning here would leave the user believing egress was filtered.
+  if [[ -n "${PI_LOCAL_MODELS:-}" ]]; then
+    echo "error: PI_EGRESS=proxy and PI_LOCAL_MODELS=1 cannot be combined." >&2
+    echo "       PI_LOCAL_MODELS shares the host network namespace, which bypasses" >&2
+    echo "       the egress proxy entirely. Unset one of them." >&2
+    exit 1
+  fi
+
+  # A warning rather than an error, because unlike PI_LOCAL_MODELS this is a
+  # functionality conflict, not a security one: the forwarded agent socket is
+  # still mounted, but nothing in the container can reach an SSH server, so the
+  # exposure it normally carries is moot. Without this the failure surfaces as
+  # ssh(1) hanging and then "Could not resolve hostname", which reads like a
+  # broken network rather than a deliberate boundary.
+  if [[ -n "${PI_SSH_AGENT:-}" ]]; then
+    echo "warning: PI_SSH_AGENT=1 has no effect under PI_EGRESS=proxy — SSH cannot" >&2
+    echo "         traverse an HTTP proxy, and the internal network has no route to" >&2
+    echo "         port 22. git-over-SSH will fail; use HTTPS remotes for this" >&2
+    echo "         session, or drop PI_EGRESS to restore SSH." >&2
+  fi
+
+  return 0
+}
+
+# Brings up the proxy and appends the network flags to DOCKER_FLAGS. Call from a
+# task before `docker run`, and pair with _pi_egress_stop in its EXIT trap —
+# same contract as _cn_relay_start/_cn_relay_stop.
+_pi_egress_start() {
+  _pi_egress_preflight || return 0
+
+  "${DOCKER_CMD}" image inspect "${_PI_EGRESS_IMAGE}" > /dev/null 2>&1 \
+    || mise run pi:egress-build
+
+  # Networks are shared across concurrent sessions, so they are created if
+  # missing and never torn down. --internal is the load-bearing flag: it is what
+  # leaves the agent with no route to anywhere but this proxy.
+  "${DOCKER_CMD}" network inspect "${_PI_EGRESS_NET_INTERNAL}" > /dev/null 2>&1 \
+    || "${DOCKER_CMD}" network create --internal "${_PI_EGRESS_NET_INTERNAL}" > /dev/null
+  "${DOCKER_CMD}" network inspect "${_PI_EGRESS_NET_EXTERNAL}" > /dev/null 2>&1 \
+    || "${DOCKER_CMD}" network create "${_PI_EGRESS_NET_EXTERNAL}" > /dev/null
+
+  _PI_EGRESS_CONFDIR="$(mktemp -d)" || {
+    echo "error: could not create a temporary directory for the egress proxy config" >&2
+    exit 1
+  }
+
+  local host count=0
+  while IFS= read -r host; do
+    [[ -z "${host}" ]] && continue
+    _pi_egress_to_regex "${host}"
+    count=$((count + 1))
+  done < <(_pi_egress_allowlist) > "${_PI_EGRESS_CONFDIR}/filter"
+
+  if [[ "${count}" -eq 0 ]]; then
+    echo "error: PI_EGRESS=proxy but the allowlist is empty — the agent could not" >&2
+    echo "       reach its model provider. Drop PI_EGRESS_NO_DEFAULTS=1, or add" >&2
+    echo "       entries via PI_EGRESS_ALLOW / the allow-file." >&2
+    rm -rf "${_PI_EGRESS_CONFDIR}"
+    exit 1
+  fi
+
+  # FilterDefaultDeny is the whole point: without it the filter file would read
+  # as a blocklist and everything unlisted would be permitted. ConnectPort
+  # limits CONNECT to TLS ports, so the proxy cannot be used to tunnel to
+  # arbitrary services on an allowlisted host.
+  #
+  # No LogFile directive: tinyproxy rejects /dev/stdout ("has been changed
+  # before it could be opened") as a symlink-swap guard, but with -d and no
+  # LogFile it already logs to stdout, which is where `docker logs` wants it.
+  # `docker logs pi-egress-<pid>` is how you find out what got blocked.
+  cat > "${_PI_EGRESS_CONFDIR}/tinyproxy.conf" << EOF
+Port ${_PI_EGRESS_PORT}
+Listen 0.0.0.0
+Timeout 600
+MaxClients 200
+LogLevel ${PI_EGRESS_LOG_LEVEL:-Notice}
+PidFile "/tmp/tinyproxy.pid"
+Filter "/etc/pi-egress/filter"
+FilterDefaultDeny Yes
+FilterType ere
+FilterCaseSensitive Off
+ConnectPort 443
+ConnectPort 8443
+EOF
+
+  # $$ is the launching shell, so concurrent sessions get distinct proxies and
+  # one session's teardown cannot kill another's.
+  _PI_EGRESS_CONTAINER="pi-egress-$$"
+  "${DOCKER_CMD}" rm -f "${_PI_EGRESS_CONTAINER}" > /dev/null 2>&1 || true
+
+  if ! "${DOCKER_CMD}" run -d \
+    --name "${_PI_EGRESS_CONTAINER}" \
+    --network "${_PI_EGRESS_NET_INTERNAL}" \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges \
+    --volume "${_PI_EGRESS_CONFDIR}:/etc/pi-egress:ro" \
+    "${_PI_EGRESS_IMAGE}" > /dev/null; then
+    echo "error: could not start the egress proxy container" >&2
+    rm -rf "${_PI_EGRESS_CONFDIR}"
+    _PI_EGRESS_CONFDIR=""
+    _PI_EGRESS_CONTAINER=""
+    exit 1
+  fi
+
+  # Second attachment, after start: this is what makes the proxy dual-homed and
+  # therefore the only route out of the internal network.
+  "${DOCKER_CMD}" network connect "${_PI_EGRESS_NET_EXTERNAL}" "${_PI_EGRESS_CONTAINER}" > /dev/null
+
+  local proxy_url="http://${_PI_EGRESS_CONTAINER}:${_PI_EGRESS_PORT}"
+  DOCKER_FLAGS+=(
+    "--network" "${_PI_EGRESS_NET_INTERNAL}"
+    # Both spellings: Node/npm read the lowercase pair, most CLIs read either.
+    "--env" "HTTP_PROXY=${proxy_url}"
+    "--env" "HTTPS_PROXY=${proxy_url}"
+    "--env" "http_proxy=${proxy_url}"
+    "--env" "https_proxy=${proxy_url}"
+    "--env" "NO_PROXY=localhost,127.0.0.1"
+    "--env" "no_proxy=localhost,127.0.0.1"
+  )
+
+  echo "egress: proxy active — ${count} allowed hostname(s); everything else is blocked" >&2
+}
+
+# Every step tolerates failure: this runs from an EXIT trap under `set -e`.
+# The networks are deliberately left in place for concurrent sessions.
+_pi_egress_stop() {
+  if [[ -n "${_PI_EGRESS_CONTAINER}" ]]; then
+    "${DOCKER_CMD}" rm -f "${_PI_EGRESS_CONTAINER}" > /dev/null 2>&1 || true
+    _PI_EGRESS_CONTAINER=""
+  fi
+  if [[ -n "${_PI_EGRESS_CONFDIR}" ]]; then
+    rm -rf "${_PI_EGRESS_CONFDIR}" 2> /dev/null || true
+    _PI_EGRESS_CONFDIR=""
+  fi
+  return 0
+}

@@ -9,4 +9,5 @@ mise run test:readonly
 mise run test:extra-mounts
 mise run test:omp
 mise run test:security
+mise run test:egress
 mise run test:podman-detection

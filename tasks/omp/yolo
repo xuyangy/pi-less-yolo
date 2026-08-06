@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#MISE description="Run omp in yolo mode with the egress allowlist on and a git-recoverability warning"
+#MISE raw=true
+#MISE dir="{{cwd}}"
+set -euo pipefail
+
+# `omp --yolo` auto-approves the exec tier and, less obviously, disarms omp's
+# own CRITICAL_BASH_PATTERNS net — those return `override: true` with no policy,
+# and resolveApproval ignores override-based prompts in yolo mode. This task is
+# the same yolo, with the three things that still work stacked underneath it:
+#
+#   1. the egress allowlist, defaulted on here (kernel-enforced, and the only
+#      one of the three an injected session cannot talk its way around);
+#   2. bash.patterns deny rules from the baked overlays, which DO survive yolo
+#      because they carry an explicit policy (see omp-yolo.yml);
+#   3. a warning about work that yolo could destroy irrecoverably.
+#
+# Designed for unattended use: nothing here ever prompts. Under --yolo the only
+# remaining source of an approval request is a bash.patterns `prompt` rule, and
+# the overlays use none — every rule is allow-or-deny, so the session never
+# stops waiting for an answer nobody is there to give.
+#
+# None of it makes yolo safe. It makes the irreversible outcomes narrower and
+# the reversible ones visible.
+
+_PI_VARIANT=omp
+
+# Default the allowlist on for this task, since yolo is exactly where unattended
+# egress matters most. Still overridable: PI_EGRESS=off restores plain yolo, and
+# an explicit PI_EGRESS=proxy from the environment is left alone.
+export PI_EGRESS="${PI_EGRESS:-proxy}"
+
+# shellcheck source=tasks/pi/_docker_flags
+source "$(dirname "$0")/../pi/_docker_flags"
+
+DOCKER_FLAGS+=("--interactive")
+[ -t 0 ] && [ -t 1 ] && DOCKER_FLAGS+=("--tty")
+
+# Layer the unattended rule set over the image default. PI_CONFIG_FILES is
+# path.delimiter-separated; later files win, and for arrays they REPLACE rather
+# than merge — which is why omp-yolo.yml restates every rule instead of adding
+# to them. Both paths are read-only in the image.
+DOCKER_FLAGS+=("--env" "PI_CONFIG_FILES=/etc/omp/hardened.yml:/etc/omp/yolo.yml")
+
+# Recoverability check. Everything yolo can destroy in the working tree is
+# recoverable if it is committed AND pushed; this reports what is neither.
+# Warn-only by design — a hard block would just get bypassed, and the point is
+# to make the exposure visible at the moment it is being accepted.
+#
+# Every git call tolerates failure: a non-repo directory, a repo with no
+# commits, and a branch with no upstream are all normal, and none of them should
+# stop the session.
+_omp_yolo_git_warning() {
+  git rev-parse --is-inside-work-tree > /dev/null 2>&1 || return 0
+
+  local dirty ahead=0 upstream
+  dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+  if upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null); then
+    ahead=$(git rev-list --count "${upstream}..HEAD" 2>/dev/null || echo 0)
+  else
+    upstream=""
+  fi
+
+  [[ "${dirty}" -eq 0 && "${ahead}" -eq 0 && -n "${upstream}" ]] && return 0
+
+  echo "warning: yolo mode can destroy the following irrecoverably:" >&2
+  [[ "${dirty}" -gt 0 ]] && echo "         - ${dirty} uncommitted change(s)" >&2
+  [[ "${ahead}" -gt 0 ]] && echo "         - ${ahead} unpushed commit(s) on $(git rev-parse --abbrev-ref HEAD 2>/dev/null)" >&2
+  [[ -z "${upstream}" ]] && echo "         - no upstream branch, so nothing here exists on a remote" >&2
+  echo "         Commit and push first if you want a fallback." >&2
+  return 0
+}
+
+if [ -n "${TMUX:-}" ]; then
+  tmux set-option -p allow-passthrough on 2>/dev/null || true
+  trap '_cn_relay_stop; _pi_egress_stop; tmux set-option -p allow-passthrough off 2>/dev/null || true' EXIT
+else
+  trap '_cn_relay_stop; _pi_egress_stop' EXIT
+fi
+
+_omp_yolo_git_warning
+_cn_relay_start
+_pi_egress_start
+
+OMP_ARGS=()
+if [[ -z "${PI_NO_CONTAINER_PROMPT:-}" ]]; then
+  OMP_ARGS+=(
+    "--append-system-prompt"
+    "You are running inside a Docker container as a non-root user. No Docker socket, sudo, or system package installation (apt requires root) is available."
+  )
+fi
+
+# --yolo last so an explicit override in "$@" still wins.
+"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" "${OMP_ARGS[@]}" --yolo "$@"

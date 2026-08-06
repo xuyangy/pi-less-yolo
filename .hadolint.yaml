@@ -1,7 +1,10 @@
 ignored:
-  # Both base images are pinned by digest; pinning individual OS packages adds
-  # maintenance burden with minimal additional reproducibility benefit.
-  # DL3018 is the apk rule (Dockerfile), DL3008 the apt one (Dockerfile.omp).
+  # All three base images are pinned by digest; pinning individual OS packages
+  # adds maintenance burden with minimal additional reproducibility benefit — and
+  # for apk it is actively harmful, since Alpine drops superseded revisions from
+  # its index and an exact pin fails the build once that happens.
+  # DL3018 is the apk rule (Dockerfile, Dockerfile.egress), DL3008 the apt one
+  # (Dockerfile.omp).
   - DL3018
   - DL3008
 

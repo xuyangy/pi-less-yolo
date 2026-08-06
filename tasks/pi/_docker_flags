@@ -41,6 +41,13 @@ esac
 # shellcheck source=tasks/pi/_runtime
 source "$(dirname "${BASH_SOURCE[0]}")/_runtime"
 
+# Defines _pi_egress_start/_pi_egress_stop (PI_EGRESS). Sourced here so both
+# agents share one implementation, but — like the code-notify relay below — not
+# invoked here: only a task that actually runs the agent should bring a proxy
+# up, and it must pair the call with _pi_egress_stop in its EXIT trap.
+# shellcheck source=tasks/pi/_egress
+source "$(dirname "${BASH_SOURCE[0]}")/_egress"
+
 "${DOCKER_CMD}" image inspect "${PI_IMAGE}" > /dev/null 2>&1 || mise run "${_PI_BUILD_TASK}"
 
 # Pre-create so Docker doesn't auto-create it as root (breaking writes by the

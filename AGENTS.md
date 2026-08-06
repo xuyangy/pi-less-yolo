@@ -24,9 +24,15 @@ agents share `tasks/pi/_docker_flags` so the hardening cannot drift between them
 | `tasks/pi/shell` | `mise run pi:shell` — opens bash in the container with identical mounts |
 | `tasks/pi/upgrade` | `mise run pi:upgrade` — bumps the `npm install -g` line in `Dockerfile` and rebuilds |
 | `tasks/pi/health` | `mise run pi:health` — checks mise version, Docker, image, task files, `~/.pi/agent`, and tmux |
-| `Dockerfile.omp` | Single-stage Bun image for the omp (oh-my-pi) agent; installs git, ripgrep, fd, python3, tini, and the pinned `@oh-my-pi/*` npm packages. Shares `entrypoint.sh` via `PI_ENTRY_CMD=omp`. Bakes a `PI_CONFIG_FILES` overlay lowering `tools.approvalMode` from upstream `yolo` to `write`. |
+| `tasks/pi/_egress` | Sourced by `_docker_flags`; defines `_pi_egress_start`/`_pi_egress_stop` for `PI_EGRESS=proxy`. Puts the agent on a Docker `--internal` network (no route off the host) with a dual-homed tinyproxy sidecar as the only exit, allowlisting hostnames. Called by the `readonly` tasks only. |
+| `tasks/pi/egress-build` | `mise run pi:egress-build` — builds `pi-egress:latest` from `Dockerfile.egress`; agent-agnostic, so there is no omp variant |
+| `Dockerfile.egress` | Alpine + tinyproxy sidecar for `PI_EGRESS=proxy`. No config baked in — `tasks/pi/_egress` generates `tinyproxy.conf` and the filter file on the host and bind-mounts them `:ro`, so allowlist changes never need a rebuild. |
+| `Dockerfile.omp` | Single-stage Bun image for the omp (oh-my-pi) agent; installs git, ripgrep, fd, python3, tini, and the pinned `@oh-my-pi/*` npm packages. Shares `entrypoint.sh` via `PI_ENTRY_CMD=omp`. Bakes the `omp-hardened.yml` `PI_CONFIG_FILES` overlay (approval-mode floor + `bash.patterns`). The `mkdir` before that `COPY` is load-bearing: `COPY --chmod=0444` would otherwise create `/etc/omp` unreadable, silently dropping the overlay. |
 | `tasks/omp/_default` | `mise run omp` — launches omp in the container |
 | `tasks/omp/readonly` | `mise run omp:readonly` — project mounted read-only, tools limited to `read,grep,glob,ast_grep`, approval mode `always-ask` |
+| `tasks/omp/yolo` | `mise run omp:yolo` — `--yolo` with `PI_EGRESS` defaulted to `proxy`, `PI_CONFIG_FILES` pointed at both overlays, and a warning naming uncommitted/unpushed work. Relies on `bash.patterns` deny rules, which (unlike `approvalMode`) still apply under `--yolo`. Never prompts, by design. |
+| `omp-hardened.yml` | The `PI_CONFIG_FILES` overlay COPYed into the omp image: `tools.approvalMode: write` plus a deny-only `bash.patterns` list. Deny-only on purpose — a `prompt` rule is a no-op in `write` mode and a hang under `--yolo`. Outranks the user's own `config.yml` (verified), so the agent cannot relax it by writing to its state dir. |
+| `omp-yolo.yml` | Second overlay, layered by `omp:yolo` only. Restates every hardened rule (array layering REPLACES rather than merges) and adds the unattended-only denies. `test:omp` asserts superset + no `prompt` rules. |
 | `tasks/omp/build` | `mise run omp:build` — builds the omp image |
 | `tasks/omp/shell` | `mise run omp:shell` — opens bash in the omp container |
 | `.mise/tasks/ci` | `mise run ci` — lint → build → smoke test (local equivalent of CI) |
@@ -35,7 +41,7 @@ agents share `tasks/pi/_docker_flags` so the hardening cannot drift between them
 | `.mise/tasks/update` | `git pull` in the repo root; no reinstall needed |
 | `.mise/tasks/lint/_default` | Runs `lint:shell` then `lint:docker` |
 | `.mise/tasks/lint/shell` | shellcheck on all executable scripts under `tasks/` and `.mise/tasks/` |
-| `.mise/tasks/lint/docker` | hadolint on `Dockerfile` and `Dockerfile.omp` |
+| `.mise/tasks/lint/docker` | hadolint on `Dockerfile`, `Dockerfile.omp`, and `Dockerfile.egress` |
 | `.mise.toml` | Pins tool versions (shellcheck, hadolint) for local development |
 | `.hadolint.yaml` | Suppresses three intentional hadolint rules with justification comments (DL3018, DL3008, DL3059) |
 | `.github/workflows/ci.yml` | CI: lint job + build job (image build, `--version` smoke test, `python3 --version`) |

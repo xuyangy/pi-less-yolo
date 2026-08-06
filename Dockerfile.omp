@@ -49,13 +49,19 @@ RUN bun install -g \
 # Delivered as a PI_CONFIG_FILES overlay rather than written into the mounted
 # state dir, so it applies without mutating the user's own config.yml. A session
 # can still opt out explicitly with `omp --yolo`.
-RUN mkdir -p /etc/omp \
-    && printf '%s\n' \
-        '# Managed by pi-less-yolo. Overlay applied via PI_CONFIG_FILES.' \
-        'tools:' \
-        '  approvalMode: write' \
-        > /etc/omp/hardened.yml \
-    && chmod 0444 /etc/omp/hardened.yml
+#
+# The same file also carries a bash.patterns deny/prompt list, which — unlike
+# approvalMode — keeps applying under `--yolo`. That is what `mise run omp:yolo`
+# is built on. See omp-hardened.yml for the mechanism and the syntax rules.
+# The mkdir is load-bearing: a bare COPY creates missing parents with the same
+# --chmod as the file, and a 0444 directory has no traversal bit, so the runtime
+# UID cannot read the overlay at all. omp then starts with upstream defaults —
+# yolo, no patterns — and says nothing. Create the directory 0755 first.
+RUN mkdir -p /etc/omp && chmod 0755 /etc/omp
+COPY --chmod=0444 omp-hardened.yml /etc/omp/hardened.yml
+# Layered on top only by `mise run omp:yolo`, which overrides PI_CONFIG_FILES.
+# Present but inert for every other task.
+COPY --chmod=0444 omp-yolo.yml /etc/omp/yolo.yml
 ENV PI_CONFIG_FILES=/etc/omp/hardened.yml
 
 # Same layout rationale as the pi image: world-writable $HOME so any runtime UID
