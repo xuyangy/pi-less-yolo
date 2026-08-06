@@ -168,6 +168,31 @@ legitimate use in this sandbox. The overlay takes effect without touching your o
 `patterns: []` does not override it. That matters because the agent can write to its own
 state directory, so a self-relaxing config would otherwise be one injected command away.
 
+Changing **Tool Approval** in `/settings` is therefore inert — the write persists to
+`~/.omp/agent/config.yml` and is then outranked, so the row snaps back to `Write` and
+`omp config set tools.approvalMode yolo` answers `✔ Set tools.approvalMode = write`. Use
+one of the opt-outs below instead.
+
+The mode is not the only way over that floor. `resolveApproval` consults the per-tool
+`tools.approval` map *before* it compares a tool's tier against the mode, so three lines
+of `config.yml` —
+
+```yaml
+tools:
+  approval:
+    bash: allow
+```
+
+— would auto-approve bash in `write` mode. Same reach as the mode switch: `/settings`
+("Tool Approval Policies"), `omp config set`, or the agent writing its own state dir. The
+overlay closes it by pinning every built-in to `inherit`, which is not one of omp's three
+policies — `normalizePolicy` drops unrecognised values, so the mode decides again. Pinning
+`prompt` would have been wrong in both directions: it prompts per command under `--yolo`
+(where a user policy *is* honoured), and it prompts on every read, since the map is
+consulted before the tier is. Two gaps remain by construction: MCP and plugin tools mint
+their names at runtime and cannot be listed, and a tool added by a future omp release is
+unpinned until `omp-hardened.yml` names it — `mise run test:omp` fails when that happens.
+
 Opt back out per session:
 
 ```bash
@@ -202,6 +227,11 @@ policy, and `resolveApproval` ignores override-based prompts in yolo by design. 
 | `tools.approvalMode` floor | exec prompts | ignored |
 | `CRITICAL_BASH_PATTERNS` | prompt | **allow** |
 | `bash.patterns` `deny` | deny | **deny** |
+| a `tools.approval` policy | honoured, ahead of the mode | honoured, ahead of the mode |
+
+The last row is why the overlay pins those per-tool policies: it is the one input that
+outranks the mode in *both* columns, so leaving it open would leave a `bash: allow` in
+`config.yml` deciding the outcome.
 
 A user-supplied `deny` rule carries an explicit policy, which short-circuits before the
 yolo branch is reached. That is the entire mechanism this task rests on.
@@ -216,21 +246,24 @@ Two files, layered:
 
 | File | Applies to | Contents |
 |---|---|---|
-| `omp-hardened.yml` | every omp task | approval floor, plus denies for what is never legitimate: absolute-path `rm -rf`, `mkfs`, `dd` to a device, `curl … \| sh` |
+| `omp-hardened.yml` | every omp task | approval floor and the per-tool pins that keep it standing, plus denies for what is never legitimate: absolute-path `rm -rf`, `mkfs`, `dd` to a device, `curl … \| sh` |
 | `omp-yolo.yml` | `omp:yolo` only | all of the above, plus what only unattended operation rules out: `git push --force`, `git reset --hard`, history rewrites, and the global installs that persist into `~/.omp` |
 
 `PI_CONFIG_FILES` layering replaces arrays rather than merging them, so `omp-yolo.yml`
 restates every rule; `mise run test:omp` asserts it stays a superset and contains no
-`prompt` rule.
+`prompt` rule. Maps are the other case — they merge per key, so the `tools.approval` pins
+from `omp-hardened.yml` carry over here without being restated.
 
 > **The overlay outranks your own config**, which is the point. A `~/.omp/agent/config.yml`
-> setting `patterns: []` and `approvalMode: yolo` does *not* override it — verified. That
-> matters because the agent can write to its own state directory, so a self-relaxing
-> config would otherwise be one injected command away.
+> setting `patterns: []`, `approvalMode: yolo`, or `approval: {bash: allow}` does *not*
+> override it — verified. That matters because the agent can write to its own state
+> directory, so a self-relaxing config would otherwise be one injected command away.
 >
-> The flip side: you cannot relax a rule you find too strict from your config either. Edit
-> `omp-yolo.yml` and run `mise run omp:build`, or use `mise run omp -- --yolo` for
-> upstream behaviour with only the hardened floor.
+> The flip side: you cannot relax a rule you find too strict from your config either — nor
+> tighten one, since the pins outrank `browser: deny` exactly as they outrank
+> `browser: allow`. Drop a tool with `--tools`, edit `omp-yolo.yml` and run
+> `mise run omp:build`, or use `mise run omp -- --yolo` for upstream behaviour with only
+> the hardened floor.
 
 **The task adds two things** on top:
 

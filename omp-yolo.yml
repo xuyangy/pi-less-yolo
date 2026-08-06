@@ -8,6 +8,13 @@
 # delta; it has to carry every rule. `mise run test:omp` asserts that it remains
 # a superset of omp-hardened.yml, so the two cannot drift apart silently.
 #
+# Maps are the other case: they merge per key. omp-hardened.yml is always loaded
+# first (PI_CONFIG_FILES=/etc/omp/hardened.yml:/etc/omp/yolo.yml), so its
+# `tools.approval` pins carry over here untouched and are deliberately not
+# restated. They cost nothing under yolo — an unrecognised policy resolves to the
+# mode's own verdict, which is `allow` — and they keep a config.yml `bash: allow`
+# from being the thing that decides it.
+#
 # WHY EVERYTHING IS `deny`
 #
 # This file is for unattended yolo — started and walked away from. Under

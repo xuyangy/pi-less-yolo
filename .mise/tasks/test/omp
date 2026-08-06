@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Smoke test the omp (oh-my-pi) image: starts, defaults to non-root, resolves its state dir onto the host mount, and lowers the approval mode below upstream yolo"
+#MISE description="Smoke test the omp (oh-my-pi) image: starts, defaults to non-root, resolves its state dir onto the host mount, lowers the approval mode below upstream yolo, and holds that floor against a config.yml that tries to raise it"
 set -euo pipefail
 
 REPO_ROOT="${MISE_TASK_DIR}/../../.."
@@ -7,63 +7,25 @@ REPO_ROOT="${MISE_TASK_DIR}/../../.."
 # shellcheck source=tasks/pi/_docker_flags
 _PI_VARIANT=omp source "${REPO_ROOT}/tasks/pi/_docker_flags"
 
+# One cleanup list for every temp artifact this script creates, registered once.
+# A second `trap ... EXIT` replaces rather than adds, and the artifacts appear at
+# three different points — the last trap would otherwise be the only one that
+# runs. INT/TERM as well as EXIT, since bash does not run the EXIT trap on a
+# signal unless the signal itself is trapped.
+_CLEANUP_PATHS=()
+_cleanup() {
+  [ "${#_CLEANUP_PATHS[@]}" -gt 0 ] && rm -rf "${_CLEANUP_PATHS[@]}"
+  return 0
+}
+trap _cleanup EXIT
+# Cleanup must not turn an interrupt or CI SIGTERM into a successful run.
+trap '_cleanup; exit 130' INT
+trap '_cleanup; exit 143' TERM
+
 # --- starts at all ----------------------------------------------------------
 version=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" --version 2>&1 | tail -1)
 [[ "${version}" == omp/* ]] || { echo "FAIL: unexpected --version output: ${version}"; exit 1; }
 echo "  OK omp starts (${version})"
-
-# --- image fails closed to a non-root UID -----------------------------------
-uid=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" bash -c 'id -u')
-[ "${uid}" != "0" ] || { echo "FAIL: omp image defaults to root"; exit 1; }
-echo "  OK omp image defaults to non-root (uid ${uid})"
-
-# --- state dir resolves onto the mount, not beside it -----------------------
-# PI_CONFIG_DIR is joined under $HOME rather than treated as an absolute path,
-# so an absolute value would silently resolve outside the mount and lose all
-# state. Assert the resolved path is the mount target.
-resolved=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config path 2>&1 | tail -1)
-[ "${resolved}" = "${_PI_STATE_TARGET}/agent" ] || {
-  echo "FAIL: omp resolved its state dir to '${resolved}', expected '${_PI_STATE_TARGET}/agent'"
-  exit 1
-}
-echo "  OK omp state dir resolves onto the host mount (${resolved})"
-
-# --- a container write reaches the host -------------------------------------
-# This is the one assertion that writes into the caller's real state dir, so the
-# probe is removed from a trap rather than inline: cleanup on the success path
-# alone leaks the file whenever the script is interrupted between creating it
-# and removing it (a failing later assertion, Ctrl-C, or a CI timeout).
-# INT/TERM as well as EXIT, since bash does not run the EXIT trap on a signal
-# unless the signal itself is trapped.
-_PROBE_PREFIX=".omp-smoke-"
-probe="${_PROBE_PREFIX}$$"
-# Sweep anything a previous run left behind — only SIGKILL can get past the trap,
-# but when it does the file would otherwise sit in the user's home forever.
-rm -f "${_PI_STATE_HOST}/${_PROBE_PREFIX}"* 2>/dev/null || true
-trap 'rm -f "${_PI_STATE_HOST}/${probe}" 2>/dev/null || true' EXIT INT TERM
-
-"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" \
-  bash -c "touch '${_PI_STATE_TARGET}/${probe}'"
-if [ -e "${_PI_STATE_HOST}/${probe}" ]; then
-  rm -f "${_PI_STATE_HOST}/${probe}"
-  echo "  OK writes to the state dir persist to the host"
-else
-  echo "FAIL: write inside the container did not reach ${_PI_STATE_HOST}"; exit 1
-fi
-
-# --- approval mode is lowered from upstream's yolo default ------------------
-# Baked as a PI_CONFIG_FILES overlay in Dockerfile.omp. yolo auto-approves the
-# exec tier — shell, browser, subagents — with no prompt.
-mode=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config get tools.approvalMode 2>&1 | tail -1)
-[ "${mode}" = "write" ] || { echo "FAIL: approvalMode is '${mode}', expected 'write'"; exit 1; }
-echo "  OK approval mode lowered to '${mode}' (upstream default is yolo)"
-
-# --- the readonly tool set is accepted by this omp version ------------------
-# Guards against a future release renaming a tool, which would otherwise only
-# surface when someone actually ran omp:readonly.
-"${DOCKER_CMD}" run --rm "${PI_IMAGE}" --tools read,grep,glob,ast_grep --version > /dev/null 2>&1 \
-  || { echo "FAIL: omp:readonly tool set rejected by this omp version"; exit 1; }
-echo "  OK omp:readonly tool set is valid for this omp version"
 
 # --- the image is built from the overlays currently in the repo -------------
 # The overlays are baked in, not read from tasks/, and the run tasks build only
@@ -86,6 +48,131 @@ for overlay in hardened yolo; do
   }
 done
 echo "  OK image overlays match the repo (not stale)"
+
+# --- image fails closed to a non-root UID -----------------------------------
+uid=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" bash -c 'id -u')
+[ "${uid}" != "0" ] || { echo "FAIL: omp image defaults to root"; exit 1; }
+echo "  OK omp image defaults to non-root (uid ${uid})"
+
+# --- state dir resolves onto the mount, not beside it -----------------------
+# PI_CONFIG_DIR is joined under $HOME rather than treated as an absolute path,
+# so an absolute value would silently resolve outside the mount and lose all
+# state. Assert the resolved path is the mount target.
+resolved=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config path 2>&1 | tail -1)
+[ "${resolved}" = "${_PI_STATE_TARGET}/agent" ] || {
+  echo "FAIL: omp resolved its state dir to '${resolved}', expected '${_PI_STATE_TARGET}/agent'"
+  exit 1
+}
+echo "  OK omp state dir resolves onto the host mount (${resolved})"
+
+# --- a container write reaches the host -------------------------------------
+# This is the one assertion that writes into the caller's real state dir, so the
+# probe is removed from a trap rather than inline: cleanup on the success path
+# alone leaks the file whenever the script is interrupted between creating it
+# and removing it (a failing later assertion, Ctrl-C, or a CI timeout).
+_PROBE_PREFIX=".omp-smoke-"
+probe="${_PROBE_PREFIX}$$"
+# Sweep anything a previous run left behind — only SIGKILL can get past the trap,
+# but when it does the file would otherwise sit in the user's home forever.
+rm -f "${_PI_STATE_HOST}/${_PROBE_PREFIX}"* 2>/dev/null || true
+_CLEANUP_PATHS+=("${_PI_STATE_HOST}/${probe}")
+
+"${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" \
+  bash -c "touch '${_PI_STATE_TARGET}/${probe}'"
+if [ -e "${_PI_STATE_HOST}/${probe}" ]; then
+  rm -f "${_PI_STATE_HOST}/${probe}"
+  echo "  OK writes to the state dir persist to the host"
+else
+  echo "FAIL: write inside the container did not reach ${_PI_STATE_HOST}"; exit 1
+fi
+
+# --- approval mode is lowered from upstream's yolo default ------------------
+# Baked as a PI_CONFIG_FILES overlay in Dockerfile.omp. yolo auto-approves the
+# exec tier — shell, browser, subagents — with no prompt.
+mode=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config get tools.approvalMode 2>&1 | tail -1)
+[ "${mode}" = "write" ] || { echo "FAIL: approvalMode is '${mode}', expected 'write'"; exit 1; }
+echo "  OK approval mode lowered to '${mode}' (upstream default is yolo)"
+
+# --- per-tool policies cannot be used to climb back over the floor ----------
+# `tools.approval.<tool>` is consulted before the tier/mode comparison, so
+# `bash: allow` in the user's own config.yml would auto-approve bash in `write`
+# mode. omp-hardened.yml pins every built-in to `inherit` — not a real policy, so
+# normalizePolicy drops it and the mode decides. Assert against a config.yml that
+# tries exactly that, in a throwaway state dir rather than the caller's own.
+approval_dir=$(mktemp -d)
+_CLEANUP_PATHS+=("${approval_dir}")
+mkdir -p "${approval_dir}/agent"
+printf 'tools:\n  approval:\n    bash: allow\n    eval: allow\n' > "${approval_dir}/agent/config.yml"
+chmod -R a+rX "${approval_dir}"
+
+merged_approval=$("${DOCKER_CMD}" run --rm \
+  --volume "${approval_dir}:${_PI_STATE_TARGET}" \
+  "${PI_IMAGE}" config get tools.approval 2>&1 | tail -1)
+case "${merged_approval}" in
+  *'"bash":"allow"'*|*'"eval":"allow"'*)
+    echo "FAIL: config.yml raised a per-tool policy over the overlay: ${merged_approval}"
+    exit 1 ;;
+esac
+[[ "${merged_approval}" == *'"bash":"inherit"'* ]] || {
+  echo "FAIL: tools.approval pins did not load from the overlay: ${merged_approval}"
+  exit 1
+}
+echo "  OK a config.yml per-tool 'allow' is outranked by the overlay"
+
+cat > "${approval_dir}/approval.ts" << 'APPROVAL_EOF'
+// Unlike the bash matcher below, resolveApproval and BUILTIN_TOOL_NAMES are
+// exported, so this calls the real thing rather than a copy. It reaches into the
+// installed package's src/ — an internal path, and the reason this assertion
+// lives in a test that runs after every omp upgrade.
+const PKG = "/usr/local/bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src";
+const { resolveApproval } = await import(`${PKG}/tools/approval.ts`);
+const { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES } = await import(`${PKG}/tools/builtin-names.ts`);
+const { VIBE_TOOL_NAMES } = await import(`${PKG}/tools/vibe.ts`);
+
+const pinned = JSON.parse(process.argv[2]) as Record<string, unknown>;
+const bash = { name: "bash", approval: "exec" as const };
+let fails = 0;
+
+// The middle case is the gap, asserted rather than assumed: without a pin, one
+// line of user config turns the exec floor off.
+const CASES: [string, "write" | "yolo", Record<string, unknown>, string][] = [
+  ["no policy, write", "write", {}, "prompt"],
+  ["unpinned 'allow', write", "write", { bash: "allow" }, "allow"],
+  ["pinned 'inherit', write", "write", { bash: "inherit" }, "prompt"],
+  ["pinned 'inherit', yolo", "yolo", { bash: "inherit" }, "allow"],
+  ["no policy, yolo", "yolo", {}, "allow"],
+];
+for (const [label, mode, cfg, want] of CASES) {
+  const got = resolveApproval(bash, {}, mode, cfg).policy;
+  if (got !== want) { console.log(`FAIL: ${label} -> ${got}, expected ${want}`); fails++; }
+}
+
+// A tool omp adds in a later release is unpinned until it is listed in
+// omp-hardened.yml, and nothing else would notice. `advise`, `tts`, and
+// `generate_image` have no exported name list; both latter tools are write tier.
+const PINNED_TOOL_NAMES = [...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES, ...VIBE_TOOL_NAMES];
+for (const name of PINNED_TOOL_NAMES) {
+  if (pinned[name] !== "inherit") {
+    console.log(`FAIL: built-in tool '${name}' is not pinned in omp-hardened.yml (got ${JSON.stringify(pinned[name])})`);
+    fails++;
+  }
+}
+
+if (fails > 0) process.exit(1);
+console.log(`  OK 'inherit' neutralises a user policy in write and is a no-op under yolo`);
+console.log(`  OK all ${PINNED_TOOL_NAMES.length} exported built-in tool names are pinned`);
+APPROVAL_EOF
+
+"${DOCKER_CMD}" run --rm --volume "${approval_dir}/approval.ts:/tmp/approval.ts:ro" \
+  --entrypoint bun "${PI_IMAGE}" run /tmp/approval.ts "${merged_approval}" \
+  || { echo "FAIL: per-tool approval pins did not behave as intended"; exit 1; }
+
+# --- the readonly tool set is accepted by this omp version ------------------
+# Guards against a future release renaming a tool, which would otherwise only
+# surface when someone actually ran omp:readonly.
+"${DOCKER_CMD}" run --rm "${PI_IMAGE}" --tools read,grep,glob,ast_grep --version > /dev/null 2>&1 \
+  || { echo "FAIL: omp:readonly tool set rejected by this omp version"; exit 1; }
+echo "  OK omp:readonly tool set is valid for this omp version"
 
 # --- the overlay is actually readable by the runtime UID --------------------
 # COPY --chmod creates missing parent directories with the same mode, and a 0444
@@ -131,7 +218,7 @@ done < <(grep -oE '"match":"[^"]*"' <<< "${rules}" | sed 's/"match":"//; s/"$//'
 echo "  OK omp:yolo rule set is a superset of the hardened one"
 
 patterns_dir=$(mktemp -d)
-trap 'rm -rf "${patterns_dir}"' EXIT
+_CLEANUP_PATHS+=("${patterns_dir}")
 cat > "${patterns_dir}/check.ts" << 'PATTERN_EOF'
 // Matcher copied verbatim from omp's bash.ts (bashApprovalPatternToRegExp +
 // normalizeBashApprovalPattern); those helpers are module-private and cannot be

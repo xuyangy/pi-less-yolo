@@ -10,8 +10,105 @@
 # driving a browser, spawning subagents — with no prompt. This lowers that floor
 # to `write`: read and write are still automatic, exec prompts. A session can opt
 # back out with `omp --yolo`, or use `mise run omp:yolo` for a hardened version.
+# PER-TOOL APPROVAL POLICIES
+#
+# The gap this closes: the mode above is a floor only for tools with no per-tool
+# policy. resolveApproval consults `tools.approval.<tool>` BEFORE it compares the
+# tool's tier against the mode (approval.ts:170), so three lines in the user's own
+# config.yml —
+#
+#   tools:
+#     approval:
+#       bash: allow
+#
+# — auto-approve bash in `write` mode, and the floor is gone. Reachable from
+# /settings ("Tool Approval Policies", the same Approvals group as the mode
+# switch), from `omp config set`, and from the agent itself, which can write to
+# its own state directory. Unlike approvalMode, this key is not covered for free:
+# records merge per key rather than being replaced wholesale, so `approval: {}`
+# here would clear nothing. Every tool has to be named.
+#
+# WHY `inherit`, WHICH IS NOT ONE OF THE THREE POLICIES
+#
+# normalizePolicy (approval.ts:44) returns undefined for any string that is not
+# allow/deny/prompt, and resolveApproval then falls through to the mode/tier
+# comparison — the same path as a user who set nothing. Verified against 17.2.7
+# by calling the real resolveApproval:
+#
+#   user policy   write mode   yolo mode
+#   (none)        prompt       allow
+#   allow         allow        allow
+#   inherit       prompt       allow
+#
+# So the pin restores the floor in `write` and leaves `--yolo` exactly as upstream
+# has it. `prompt` would do the first but not the second: under yolo a user
+# `prompt` policy is returned verbatim (approval.ts:143), turning `omp:yolo` and
+# `mise run omp -- --yolo` into a prompt per command — a hang with nobody
+# watching. It is also wrong for the read tier, since the policy is consulted
+# before the tier is: `read: prompt` would prompt on every file read.
+#
+# WHAT IT COSTS. Tightening from your own config.yml is blocked the same way —
+# the overlay outranks `browser: deny` exactly as it outranks `browser: allow`.
+# Drop a tool from the session with `--tools`, or edit this file and rebuild.
+#
+# WHAT IT DOES NOT COVER. MCP and plugin tools mint their names at runtime
+# (`mcp__<server>_<tool>`), so they cannot be listed, and a policy on one of those
+# still lands. The list is BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, and
+# VIBE_TOOL_NAMES as of 17.2.7; a tool added by a later release is unpinned until
+# it is added here. `mise run test:omp` asserts every name exported by those lists
+# is pinned.
+#
+# One behavioural edge, in a path no task here uses: under ACP an explicit yolo
+# session skips the client-side permission gate only when the per-tool policy is
+# absent or `allow` (session-tools.ts:476), so `inherit` re-arms that gate.
 tools:
   approvalMode: write
+  approval:
+    # exec tier in every case — what the `write` floor exists to gate.
+    bash: inherit
+    browser: inherit
+    computer: inherit
+    eval: inherit
+    security_scan: inherit
+    task: inherit
+    vibe_send: inherit
+    vibe_spawn: inherit
+    # exec tier for some arguments and read tier for others: `github` write ops,
+    # `debug` non-readonly actions, `hub` process writes, `write` to an xd://
+    # device. An `allow` here would cover the exec half too.
+    debug: inherit
+    github: inherit
+    hub: inherit
+    write: inherit
+    # read/write tier. Pinned anyway: `write: allow` would bypass the floor under
+    # `--approval-mode always-ask`, which is what omp:readonly runs on.
+    advise: inherit
+    ask: inherit
+    ast_edit: inherit
+    ast_grep: inherit
+    checkpoint: inherit
+    edit: inherit
+    generate_image: inherit
+    glob: inherit
+    goal: inherit
+    grep: inherit
+    inspect_image: inherit
+    learn: inherit
+    lsp: inherit
+    manage_skill: inherit
+    memory_edit: inherit
+    read: inherit
+    recall: inherit
+    reflect: inherit
+    retain: inherit
+    rewind: inherit
+    todo: inherit
+    tts: inherit
+    web_search: inherit
+    yield: inherit
+    vibe_kill: inherit
+    vibe_list: inherit
+    vibe_wait: inherit
 
 # BASH PATTERNS
 #
