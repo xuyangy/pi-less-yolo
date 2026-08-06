@@ -320,7 +320,21 @@ cd /path/to/pi-less-yolo
 mise run update
 ```
 
-`git pull` is all that's needed. Because mise includes the `tasks/` directory directly, changes go live immediately with no reinstall.
+No reinstall is needed. Because mise includes the `tasks/` directory directly, task changes go live immediately.
+
+> **Rebuild the omp image if the pull touched `Dockerfile.omp`, `omp-hardened.yml`, or
+> `omp-yolo.yml`:**
+>
+> ```bash
+> mise run omp:build
+> ```
+>
+> The approval floor and the command denylist are **baked into the image**, not read from
+> `tasks/`, so a pull alone does not update them. The run tasks build only when an image is
+> *missing*, never when it is stale — so an out-of-date image is used silently, and
+> `mise run omp:yolo` will start the proxy and print its warning while the bash rules are
+> not actually present. `mise run test:omp` catches this: it compares the running image's
+> behaviour against what the overlays specify.
 
 ### Upgrade pi to the latest release
 

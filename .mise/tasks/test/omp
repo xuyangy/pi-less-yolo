@@ -65,6 +65,28 @@ echo "  OK approval mode lowered to '${mode}' (upstream default is yolo)"
   || { echo "FAIL: omp:readonly tool set rejected by this omp version"; exit 1; }
 echo "  OK omp:readonly tool set is valid for this omp version"
 
+# --- the image is built from the overlays currently in the repo -------------
+# The overlays are baked in, not read from tasks/, and the run tasks build only
+# when an image is *missing* — never when it is stale. So a `mise run update`
+# that changes a rule leaves the old image in place and silently in use. Compare
+# content rather than timestamps: a rebuild that changed nothing is fine.
+_sha256() {
+  if command -v sha256sum > /dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else shasum -a 256 | cut -d' ' -f1
+  fi
+}
+for overlay in hardened yolo; do
+  repo_sum=$(_sha256 < "${REPO_ROOT}/omp-${overlay}.yml")
+  image_sum=$("${DOCKER_CMD}" run --rm --entrypoint sh "${PI_IMAGE}" \
+    -c "cat /etc/omp/${overlay}.yml" | _sha256)
+  [ "${repo_sum}" = "${image_sum}" ] || {
+    echo "FAIL: omp-${overlay}.yml differs from /etc/omp/${overlay}.yml in the image."
+    echo "      The image is stale — run 'mise run omp:build'."
+    exit 1
+  }
+done
+echo "  OK image overlays match the repo (not stale)"
+
 # --- the overlay is actually readable by the runtime UID --------------------
 # COPY --chmod creates missing parent directories with the same mode, and a 0444
 # directory has no traversal bit. When that happened the file was present but
