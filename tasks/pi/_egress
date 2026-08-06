@@ -139,14 +139,53 @@ _pi_egress_to_regex() {
 # which would abort the caller under `set -e` even though the network is now
 # perfectly usable. Re-inspect instead of trusting the create's exit status.
 # Extra arguments are passed to `network create` (e.g. --internal).
+#
+# Then verify the network actually has the topology the name implies. These are
+# long-lived shared objects created once and never torn down, so a session can
+# inherit one it did not make — hand-created while debugging, left over from an
+# older version of this file, or simply a name collision. Accepting a
+# pi-egress-internal that lacks the Internal flag would be the worst possible
+# failure here: the agent joins an ordinary bridge with full direct egress while
+# the startup line still reports the allowlist as active. Fail closed instead.
 _pi_egress_ensure_network() {
   local name="$1"
   shift
-  "${DOCKER_CMD}" network inspect "${name}" > /dev/null 2>&1 && return 0
-  "${DOCKER_CMD}" network create "$@" "${name}" > /dev/null 2>&1 && return 0
-  "${DOCKER_CMD}" network inspect "${name}" > /dev/null 2>&1 && return 0
-  echo "error: could not create or find the egress network '${name}'" >&2
-  exit 1
+
+  local arg want_internal=false
+  for arg in "$@"; do
+    [[ "${arg}" == "--internal" ]] && want_internal=true
+  done
+
+  if ! "${DOCKER_CMD}" network inspect "${name}" > /dev/null 2>&1; then
+    if ! "${DOCKER_CMD}" network create "$@" "${name}" > /dev/null 2>&1; then
+      if ! "${DOCKER_CMD}" network inspect "${name}" > /dev/null 2>&1; then
+        echo "error: could not create or find the egress network '${name}'" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  local is_internal
+  is_internal=$("${DOCKER_CMD}" network inspect --format '{{.Internal}}' "${name}" 2>/dev/null) || is_internal="unknown"
+
+  if [[ "${want_internal}" == true && "${is_internal}" != "true" ]]; then
+    echo "error: the network '${name}' exists but is not internal (Internal=${is_internal})." >&2
+    echo "       Containers on it would reach the internet directly, bypassing the egress" >&2
+    echo "       proxy entirely while the session reports filtering as active." >&2
+    echo "       Remove it so it can be recreated correctly:" >&2
+    echo "         ${DOCKER_CMD} network rm ${name}" >&2
+    echo "       (stop any container still attached to it first)." >&2
+    exit 1
+  fi
+
+  if [[ "${want_internal}" == false && "${is_internal}" == "true" ]]; then
+    echo "error: the network '${name}' exists but is internal (Internal=true)." >&2
+    echo "       The proxy needs it to reach the internet; every allowlisted request" >&2
+    echo "       would fail. Remove it so it can be recreated correctly:" >&2
+    echo "         ${DOCKER_CMD} network rm ${name}" >&2
+    echo "       (stop any container still attached to it first)." >&2
+    exit 1
+  fi
 }
 
 # Validates PI_EGRESS and reports how it interacts with the other knobs.

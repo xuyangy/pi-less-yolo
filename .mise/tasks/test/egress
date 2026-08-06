@@ -110,6 +110,34 @@ else
   failures=$((failures + 1))
 fi
 
+# A pre-existing network with the right name but the wrong topology must abort.
+# Silently accepting a non-internal "internal" network would put the agent on an
+# ordinary bridge with full direct egress while the session still reports the
+# allowlist as active — the one failure mode that looks like success.
+probe_net="pi-egress-probe-$$"
+"${DOCKER_CMD}" network rm "${probe_net}" > /dev/null 2>&1 || true
+"${DOCKER_CMD}" network create "${probe_net}" > /dev/null   # deliberately NOT --internal
+if ( _pi_egress_ensure_network "${probe_net}" --internal ) 2> /dev/null; then
+  echo "  FAIL ensure_network accepted a non-internal network as internal"
+  failures=$((failures + 1))
+else
+  echo "  OK a non-internal network is refused where internal is required"
+fi
+"${DOCKER_CMD}" network rm "${probe_net}" > /dev/null 2>&1 || true
+
+# The mirror image: an internal network where the proxy needs real egress would
+# block every allowlisted request, so it is refused too rather than half-working.
+probe_net_i="pi-egress-probe-i-$$"
+"${DOCKER_CMD}" network rm "${probe_net_i}" > /dev/null 2>&1 || true
+"${DOCKER_CMD}" network create --internal "${probe_net_i}" > /dev/null
+if ( _pi_egress_ensure_network "${probe_net_i}" ) 2> /dev/null; then
+  echo "  FAIL ensure_network accepted an internal network for external egress"
+  failures=$((failures + 1))
+else
+  echo "  OK an internal network is refused where external egress is required"
+fi
+"${DOCKER_CMD}" network rm "${probe_net_i}" > /dev/null 2>&1 || true
+
 # Asserts on curl's exit status, not the HTTP code: a blocked request never
 # gets a response, and an allowed one may legitimately answer 401 (no API key).
 check() {
