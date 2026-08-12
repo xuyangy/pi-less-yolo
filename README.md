@@ -155,6 +155,44 @@ only. Bump the omp pins by editing `Dockerfile.omp` (Renovate opens PRs for both
 > matcher in `bash.ts`, neither of which is a public API. The tests assert the observable
 > behaviour, so a release that changes it fails there rather than silently in a session.
 
+### Language servers
+
+omp has an `lsp` tool but ships no servers with it: its defaults declare ~53 of them
+as a command name plus arguments, and it starts the ones whose binary it can find on
+`$PATH` and whose root markers match your project. A server that is not installed is
+skipped without a word, and nothing inside the container can install one — the runtime
+UID has no root and no package manager.
+
+The image therefore carries them, pinned in `Dockerfile.omp` alongside the agent:
+
+| Language | Server | Starts when the project has |
+|---|---|---|
+| TypeScript / JavaScript | `typescript-language-server` (on TypeScript 5.x) | `package.json`, a lockfile |
+| Python | `basedpyright` + `ruff` | `pyproject.toml`, `requirements.txt`, `setup.py` |
+| Lua | `lua-language-server` | `.luarc.json`, `.luacheckrc`, `stylua.toml` |
+| Bash | `bash-language-server` (with `shellcheck` and `shfmt`) | any git repo |
+| YAML | `yaml-language-server` | any git repo |
+| JSON / HTML / CSS | `vscode-langservers-extracted` | any git repo |
+| Dockerfile | `docker-langserver` | a `Dockerfile` |
+| Ansible | `ansible-language-server` (with `ansible-lint`) | `ansible.cfg`, `.ansible-lint`, `galaxy.yml`, `playbooks/`, `roles/` |
+
+A project's own tooling still wins where it exists: omp checks `node_modules/.bin` and
+`.venv/bin` before `$PATH`, so a repo pinning its own `typescript` or `ruff` gets that
+one, and these are the fallback.
+
+Ansible is the one that needed more than a package. The
+[vscode-ansible](https://github.com/ansible/vscode-ansible) server has no entry in omp's
+defaults, so `omp-lsp.yml` — baked in at `$HOME/.lsp.yml`, the lowest-priority config
+location, so any project `lsp.json` still overrides it — adds one and points it at the
+`ansible-lint`, `ansible-doc`, and `ansible-playbook` in `/opt/omp-python`. Only
+`ansible-core` is installed, not the full `ansible` distribution with its ~1 GB of
+bundled collections; `ansible-galaxy install` into the workspace for anything a playbook
+actually needs. Execution environments are turned off — they would need a container
+runtime, which this sandbox deliberately does not expose.
+
+The servers add roughly 350 MB to the image. `mise run test:omp` asserts each one still
+resolves, which is the check that catches an upstream rename after a version bump.
+
 ### Approval mode
 
 omp ships with `tools.approvalMode: yolo`, which auto-approves its `exec` tier —

@@ -263,3 +263,82 @@ PATTERN_EOF
 "${DOCKER_CMD}" run --rm -v "${patterns_dir}/check.ts:/tmp/check.ts:ro" \
   --entrypoint bun "${PI_IMAGE}" run /tmp/check.ts "${yolo_rules}" \
   || { echo "FAIL: bash.patterns did not behave as intended"; exit 1; }
+
+# --- the LSP config in the image is the one in the repo ---------------------
+# Same staleness trap as the overlays above, one directory further out: .lsp.yml
+# is baked in, and nothing rebuilds on edit.
+lsp_repo_sum=$(_sha256 < "${REPO_ROOT}/omp-lsp.yml")
+lsp_image_sum=$("${DOCKER_CMD}" run --rm --entrypoint sh "${PI_IMAGE}" \
+  -c 'cat /home/ompuser/.lsp.yml' | _sha256)
+[ "${lsp_repo_sum}" = "${lsp_image_sum}" ] || {
+  echo "FAIL: omp-lsp.yml differs from /home/ompuser/.lsp.yml in the image."
+  echo "      The image is stale — run 'mise run omp:build'."
+  exit 1
+}
+echo "  OK image LSP config matches the repo (not stale)"
+
+# --- the language servers omp will look for are actually installed ----------
+# omp resolves servers by the `command` in its defaults.json, not by package
+# name, and a server whose binary is missing is skipped in silence — no warning,
+# no degraded-mode message, just an lsp tool that answers nothing. An upstream
+# rename or a dropped bin entry after an npm bump would land exactly there, so
+# this drives omp's own loadConfig() over a fixture project carrying one root
+# marker per language.
+lsp_dir=$(mktemp -d)
+_CLEANUP_PATHS+=("${lsp_dir}")
+mkdir -p "${lsp_dir}/roles" "${lsp_dir}/.git"
+touch "${lsp_dir}/ansible.cfg" "${lsp_dir}/pyproject.toml" "${lsp_dir}/package.json" \
+  "${lsp_dir}/Dockerfile" "${lsp_dir}/.luarc.json" "${lsp_dir}/play.yml"
+
+cat > "${lsp_dir}/lsp-check.ts" << 'LSP_EOF'
+// Reaches into the installed package's src/, like the approval check above.
+const PKG = "/usr/local/bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src";
+const { loadConfig } = await import(`${PKG}/lsp/config.ts`);
+
+// Keyed by omp's server name, valued by the binary its entry invokes — the pair
+// that has to keep matching for anything to start.
+const WANT: Record<string, string> = {
+  "typescript-language-server": "typescript-language-server",
+  basedpyright: "basedpyright-langserver",
+  ruff: "ruff",
+  bashls: "bash-language-server",
+  "lua-language-server": "lua-language-server",
+  yamlls: "yaml-language-server",
+  "vscode-json-language-server": "vscode-json-language-server",
+  dockerls: "docker-langserver",
+  ansiblels: "ansible-language-server",
+};
+
+const servers = loadConfig(process.cwd()).servers as Record<string, { resolvedCommand?: string }>;
+let fails = 0;
+for (const [name, command] of Object.entries(WANT)) {
+  const resolved = servers[name]?.resolvedCommand;
+  if (!resolved) { console.log(`FAIL: no LSP server '${name}' resolved for this project`); fails++; continue; }
+  if (!resolved.endsWith(`/${command}`)) {
+    console.log(`FAIL: '${name}' resolved to ${resolved}, expected the ${command} binary`);
+    fails++;
+  }
+}
+
+// basedpyright's package also installs a `pyright-langserver`, which satisfies
+// omp's separate pyright entry and would double every Python diagnostic.
+// omp-lsp.yml disables it; assert the disable is still taking effect.
+if (servers.pyright) { console.log("FAIL: the pyright entry is active — duplicate Python diagnostics"); fails++; }
+
+if (fails > 0) process.exit(1);
+console.log(`  OK ${Object.keys(WANT).length} language servers resolve, pyright stays disabled`);
+LSP_EOF
+
+# --user, like the run tasks, so the check sees the same permissions a real
+# session does. That makes --userns=keep-id load-bearing under rootless Podman:
+# without it the host UID maps to something else inside, and the 0700 mktemp
+# fixture becomes untraversable — Bun would fail before reaching an assertion.
+# Same glob as test/security: DOCKER_CMD has already resolved the podman-docker
+# shim, and the wildcard also covers an absolute PI_CONTAINER_RUNTIME path.
+LSP_FLAGS=("--rm" "--user" "$(id -u):$(id -g)"
+  "--volume" "${lsp_dir}:${lsp_dir}" "--workdir" "${lsp_dir}"
+  "--entrypoint" "bun")
+[[ "${DOCKER_CMD}" == *podman* ]] && LSP_FLAGS+=("--userns=keep-id")
+
+"${DOCKER_CMD}" run "${LSP_FLAGS[@]}" "${PI_IMAGE}" run "${lsp_dir}/lsp-check.ts" \
+  || { echo "FAIL: language servers are missing from the image"; exit 1; }

@@ -12,6 +12,11 @@
     {
       "matchDepNames": ["@earendil-works/pi-coding-agent"],
       "minimumReleaseAge": null
+    },
+    {
+      "description": "typescript is present only to give typescript-language-server a tsserver to drive. The 7.x package is the native port and ships no tsserver.js, so a major bump would silently leave the TS language server unable to start.",
+      "matchDepNames": ["typescript"],
+      "allowedVersions": "<6"
     }
   ],
   "customManagers": [
@@ -76,6 +81,14 @@
       ],
       "depNameTemplate": "@oh-my-pi/pi-coding-agent",
       "datasourceTemplate": "npm"
+    },
+    {
+      "description": "Language servers in Dockerfile.omp. One manager for all of them: each pin carries its own `# renovate: datasource=… depName=…` marker, which keeps npm and PyPI deps in one regex and cannot collide with the pi-coding-agent entries above (those have no marker). lua-language-server is deliberately absent — its version and two per-arch SHA-256 digests must move together, so it is bumped by hand.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^Dockerfile\\.omp$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s+\\S*?(?:@|==)(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ]
     }
   ]
 }

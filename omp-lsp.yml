@@ -1,0 +1,75 @@
+# LSP server definitions that omp does not ship defaults for.
+#
+# Baked into the image at $HOME/.lsp.yml — the LOWEST-priority config source
+# omp consults (src/lsp/config.ts: project lsp.* > .omp|.pi|.claude/lsp.* >
+# ~/.omp/agent/lsp.* > ~/lsp.*). So this adds a server without taking anything
+# away: a project's own lsp.json still wins key by key, and `disabled: true` in
+# any higher-priority file turns the entry off entirely.
+#
+# It is a config file rather than a patch to omp's defaults.json for the same
+# reason /etc/omp/hardened.yml is an overlay: the installed package stays
+# untouched, so an omp upgrade cannot silently drop the change or conflict
+# with it.
+#
+# One documented side effect. loadConfig() has two branches — auto-detect when
+# no config source exists, merge-and-filter when one does — and shipping this
+# file always takes the second. They filter identically (root markers must
+# match the cwd, the command must resolve); the merge branch additionally
+# honours `disabled`. Nothing else changes.
+servers:
+  # basedpyright's npm package installs FOUR binaries, two of them named
+  # `pyright` and `pyright-langserver`. That satisfies omp's separate `pyright`
+  # default entry as well, so both would start on every .py file and report the
+  # same diagnostics twice. Keep the one the settings are tuned for.
+  pyright:
+    disabled: true
+
+  # The server behind github.com/ansible/vscode-ansible, published to npm as
+  # @ansible/ansible-language-server. omp has no default entry for it.
+  #
+  # It is not a YAML server with extras: it shells out to ansible-lint for
+  # diagnostics, ansible-doc for module hover and completion, and
+  # ansible-playbook --syntax-check for validation. Dockerfile.omp puts all
+  # three in /opt/omp-python and the paths below name them explicitly, because
+  # the server otherwise searches $PATH and would find a project's own
+  # interpreter — which usually does not have ansible in it.
+  ansiblels:
+    command: ansible-language-server
+    args: ["--stdio"]
+    fileTypes: [".yml", ".yaml"]
+    # Required. The server activates on the `ansible` languageId and stays idle
+    # for `yaml`, so without this it would attach to every playbook and do
+    # nothing. omp sends this verbatim in textDocument/didOpen.
+    languageId: ansible
+    # Narrow on purpose. `.yml` overlaps with yamlls (root marker `.git`, i.e.
+    # every repo), and both servers answering for the same file is fine — omp
+    # merges results — but only where the repo is actually an Ansible project.
+    # A bare repo full of CI YAML matches none of these.
+    rootMarkers:
+      - ansible.cfg
+      - .ansible-lint
+      - galaxy.yml
+      - playbooks
+      - roles
+    # Delivered on the workspace/configuration pull. omp's handler matches the
+    # requested section against these top-level keys literally, so the nesting
+    # under `ansible` is what the server asks for, not decoration.
+    settings:
+      ansible:
+        python:
+          interpreterPath: /opt/omp-python/bin/python3
+        ansible:
+          path: /opt/omp-python/bin/ansible
+        validation:
+          enabled: true
+          lint:
+            enabled: true
+            path: /opt/omp-python/bin/ansible-lint
+        # No container runtime inside this container — no Docker socket, by
+        # design (AGENTS.md). Left on, the server would try to pull and run an
+        # execution-environment image for every validation and fail each time.
+        executionEnvironment:
+          enabled: false
+        completion:
+          provideRedirectModules: true
+          provideModuleOptionAliases: true
