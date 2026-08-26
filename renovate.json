@@ -3,6 +3,7 @@
   "extends": ["config:recommended"],
   "github-actions": { "enabled": false },
   "minimumReleaseAge": "3 days",
+  "prHourlyLimit": 0,
   "labels": ["dependencies", "renovate"],
   "packageRules": [
     {
