@@ -413,13 +413,21 @@ No reinstall is needed. Because mise includes the `tasks/` directory directly, t
 mise run pi:upgrade
 ```
 
-Fetches the latest `@earendil-works/pi-coding-agent` version from npm, updates the `npm install -g` line in `Dockerfile`, and rebuilds the image.
+Fetches the latest `@earendil-works/pi-coding-agent` version from npm, updates the
+`npm install -g` line in `Dockerfile`, and rebuilds the image. Unlike `mise run update`,
+this does not go through git at all — it edits your working copy in place, so the change
+is yours to commit.
+
+It rewrites **only** the pin in `Dockerfile`. The pi version badge at the top of this
+README is a second copy of that number, and the task leaves it alone — so a local
+`pi:upgrade` puts the badge one release behind. The Renovate PR for pi updates both in the
+same commit, which is why merging that PR is the tidier route when you are not in a hurry.
 
 ### Upgrade omp to a newer release
 
-There is no `omp:upgrade` task, and `mise run update` does not move omp: the version is
-pinned by hand in `Dockerfile.omp`, so a pull only changes it if the pull itself changed
-those pins.
+There is no `omp:upgrade` counterpart to `pi:upgrade`, and `mise run update` does not move
+omp: the version is pinned by hand in `Dockerfile.omp`, so a pull only changes it if the
+pull itself changed those pins.
 
 Renovate opens a PR for each new release. Once it is merged, `mise run update` followed by
 `mise run omp:build` is all that is needed. To move ahead of that PR, edit both pins in the
