@@ -12,3 +12,10 @@ ignored:
   # preserve distinct layer boundaries (install tools, install pi, install mise/uv).
   - DL3059
 
+  # DL3066 (new in hadolint 2.14) flags any non-numeric `USER`. Both images use
+  # `USER root` for the build only -- installing packages needs it -- and each
+  # ends on a numeric `USER 65532:65532`, which is the one that governs the
+  # runtime. The rule cannot tell the two apart, so it fires on every build-time
+  # root switch. The runtime UID is already numeric, which is what the rule is
+  # actually asking for.
+  - DL3066
