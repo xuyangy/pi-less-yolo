@@ -384,28 +384,39 @@ installed copy so the task reinstalls at the new pin:
 
 ## Staying current
 
-### Update the shim (new features in this repo)
+Everything with a version in it — the two agents, the language servers, mise, uv, python,
+the base image digests — is pinned, and [Renovate](https://docs.renovatebot.com) opens a PR
+per bump against this repo. So the routine is: merge the PRs on GitHub, then pull and
+rebuild locally.
 
 ```bash
 cd /path/to/pi-less-yolo
-mise run update
+mise run update      # git pull; tasks go live immediately, no reinstall
+mise run pi:build    # if the merge touched Dockerfile
+mise run omp:build   # if it touched Dockerfile.omp or either omp overlay
+mise run test        # always
 ```
 
-No reinstall is needed. Because mise includes the `tasks/` directory directly, task changes go live immediately.
+Rebuilding both when unsure is cheap — Docker's layer cache makes an unchanged image close
+to a no-op — and is safer than reasoning about which file a PR moved.
 
-> **Rebuild the omp image if the pull touched `Dockerfile.omp`, `omp-hardened.yml`, or
-> `omp-yolo.yml`:**
->
-> ```bash
-> mise run omp:build
-> ```
->
-> The approval floor and the command denylist are **baked into the image**, not read from
-> `tasks/`, so a pull alone does not update them. The run tasks build only when an image is
-> *missing*, never when it is stale — so an out-of-date image is used silently, and
-> `mise run omp:yolo` will start the proxy and print its warning while the bash rules are
-> not actually present. `mise run test:omp` catches this: it compares the running image's
-> behaviour against what the overlays specify.
+**Why the rebuilds are not automatic, and not optional.** The version pins, the approval
+floor, and the bash denylist are all baked into the images, not read from `tasks/`. A pull
+changes the files on disk; the image keeps running the old copy. The run tasks build only
+when an image is *missing*, never when it is stale — so the old image is used silently, and
+`mise run omp:yolo` will start the proxy and print its recoverability warning while the
+bash rules are simply not present. `mise run test:omp` is what catches this: it compares
+the image's overlays and behaviour against the repo's.
+
+**Why `mise run test` is part of the routine, not a formality.** The hardening reaches into
+omp internals that are not a public API — the tier semantics in `resolveApproval`, the glob
+matcher in `bash.ts`, the exported tool-name lists. An omp upgrade can move any of them and
+nothing else would report it. The 17 → 18 bump added a new built-in tool, `think`, which
+stayed unpinned in `omp-hardened.yml` until `test:omp` failed on it.
+
+If Renovate is not enabled on your own fork, the two sections below are the manual
+equivalents. Its config lives in `renovate.json`; the omp entry deliberately models the two
+`@oh-my-pi/*` pins as one dependency, so a PR can never bump one and leave the other behind.
 
 ### Upgrade pi to the latest release
 
@@ -429,9 +440,8 @@ There is no `omp:upgrade` counterpart to `pi:upgrade`, and `mise run update` doe
 omp: the version is pinned by hand in `Dockerfile.omp`, so a pull only changes it if the
 pull itself changed those pins.
 
-Renovate opens a PR for each new release. Once it is merged, `mise run update` followed by
-`mise run omp:build` is all that is needed. To move ahead of that PR, edit both pins in the
-`bun install -g` line near the top of `Dockerfile.omp`:
+To move ahead of the Renovate PR, edit both pins in the `bun install -g` line near the top
+of `Dockerfile.omp`:
 
 ```
 @oh-my-pi/pi-coding-agent@<version>
@@ -447,10 +457,6 @@ mise run omp:build
 **The two versions must be identical.** `pi-natives` is the prebuilt Rust addon compiled
 against one specific agent release; a mismatched pair fails at load time, not at build
 time.
-
-> **After an omp upgrade, run `mise run test:omp`.** The approval floor and the bash
-> denylist both depend on omp internals that are not a public API, so an upgrade can
-> disable them silently. The tests assert the observable behaviour and fail if it moved.
 
 ## Health check
 
