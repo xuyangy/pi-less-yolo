@@ -102,6 +102,7 @@ tools:
     reflect: inherit
     retain: inherit
     rewind: inherit
+    think: inherit
     todo: inherit
     tts: inherit
     web_search: inherit
