@@ -42,8 +42,8 @@ ENV PATH="/usr/local/bun/bin:${PATH}"
 # Pinned, like pi in the sibling Dockerfile. Renovate tracks both.
 # @oh-my-pi/pi-natives is the prebuilt Rust addon; it must match the agent version.
 RUN bun install -g \
-        @oh-my-pi/pi-coding-agent@17.4.2 \
-        @oh-my-pi/pi-natives@17.4.2 \
+        @oh-my-pi/pi-coding-agent@18.0.3 \
+        @oh-my-pi/pi-natives@18.0.3 \
     && chmod -R a+rX /usr/local/bun
 
 # LANGUAGE SERVERS
