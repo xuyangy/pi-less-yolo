@@ -415,6 +415,35 @@ mise run pi:upgrade
 
 Fetches the latest `@earendil-works/pi-coding-agent` version from npm, updates the `npm install -g` line in `Dockerfile`, and rebuilds the image.
 
+### Upgrade omp to a newer release
+
+There is no `omp:upgrade` task, and `mise run update` does not move omp: the version is
+pinned by hand in `Dockerfile.omp`, so a pull only changes it if the pull itself changed
+those pins.
+
+Renovate opens a PR for each new release. Once it is merged, `mise run update` followed by
+`mise run omp:build` is all that is needed. To move ahead of that PR, edit both pins in the
+`bun install -g` line near the top of `Dockerfile.omp`:
+
+```
+@oh-my-pi/pi-coding-agent@<version>
+@oh-my-pi/pi-natives@<version>
+```
+
+Then rebuild:
+
+```bash
+mise run omp:build
+```
+
+**The two versions must be identical.** `pi-natives` is the prebuilt Rust addon compiled
+against one specific agent release; a mismatched pair fails at load time, not at build
+time.
+
+> **After an omp upgrade, run `mise run test:omp`.** The approval floor and the bash
+> denylist both depend on omp internals that are not a public API, so an upgrade can
+> disable them silently. The tests assert the observable behaviour and fail if it moved.
+
 ## Health check
 
 ```bash
