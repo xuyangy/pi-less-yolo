@@ -92,7 +92,7 @@ RUN touch /tmp/lsp.stamp \
         # renovate: datasource=npm depName=basedpyright
         basedpyright@1.39.10 \
         # renovate: datasource=npm depName=bash-language-server
-        bash-language-server@5.6.0 \
+        bash-language-server@5.8.1 \
         # renovate: datasource=npm depName=yaml-language-server
         yaml-language-server@1.24.0 \
         # renovate: datasource=npm depName=vscode-langservers-extracted
