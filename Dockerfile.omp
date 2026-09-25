@@ -168,7 +168,7 @@ RUN set -eu \
         # renovate: datasource=pypi depName=ruff
         ruff==0.16.4 \
         # renovate: datasource=pypi depName=ansible-lint
-        ansible-lint==26.8.0 \
+        ansible-lint==26.9.0 \
     && for _bin in ruff ansible ansible-config ansible-doc ansible-galaxy \
                    ansible-inventory ansible-lint ansible-playbook ansible-vault; do \
         ln -s "/opt/omp-python/bin/${_bin}" "/usr/local/bin/${_bin}"; \
