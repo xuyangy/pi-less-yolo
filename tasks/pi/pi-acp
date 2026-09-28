@@ -18,7 +18,7 @@ DOCKER_FLAGS+=("--interactive")
 # run — so an unpinned floating install would let one bad release of a
 # third-party package shadow any command in all future sessions. Bump
 # deliberately (Renovate tracks it via renovate.json).
-PI_ACP_VERSION="0.0.33"
+PI_ACP_VERSION="0.0.34"
 
 # Installs pi-acp to /pi-agent/npm-global if absent, then starts it.
 # shellcheck disable=SC2016  # $1 is a positional parameter in the child sh -c, not the current shell
