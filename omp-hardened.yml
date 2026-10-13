@@ -77,6 +77,7 @@ tools:
     # `debug` non-readonly actions, `hub` process writes, `write` to an xd://
     # device. An `allow` here would cover the exec half too.
     debug: inherit
+    ida: inherit
     github: inherit
     hub: inherit
     write: inherit
@@ -89,12 +90,15 @@ tools:
     checkpoint: inherit
     edit: inherit
     generate_image: inherit
+    context_notes: inherit
+    find: inherit
     glob: inherit
     goal: inherit
     grep: inherit
     inspect_image: inherit
     learn: inherit
     lsp: inherit
+    new_context: inherit
     manage_skill: inherit
     memory_edit: inherit
     read: inherit
@@ -110,6 +114,7 @@ tools:
     vibe_kill: inherit
     vibe_list: inherit
     vibe_wait: inherit
+    wait: inherit
 
 # BASH PATTERNS
 #
