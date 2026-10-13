@@ -22,8 +22,22 @@ trap _cleanup EXIT
 trap '_cleanup; exit 130' INT
 trap '_cleanup; exit 143' TERM
 
+# Runs a command and prints the last line of its output, which is where omp
+# puts the value it was asked for. A bare `var=$(cmd | tail -1)` ends the script
+# under `set -e -o pipefail` when cmd fails, with the reason discarded by the
+# pipe — so on a non-zero exit this prints everything the command wrote.
+_last_line() {
+  local out
+  out=$("$@" 2>&1) || {
+    echo "FAIL: command exited non-zero: $*" >&2
+    printf '%s\n' "${out}" >&2
+    return 1
+  }
+  tail -1 <<< "${out}"
+}
+
 # --- starts at all ----------------------------------------------------------
-version=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" --version 2>&1 | tail -1)
+version=$(_last_line "${DOCKER_CMD}" run --rm "${PI_IMAGE}" --version)
 [[ "${version}" == omp/* ]] || { echo "FAIL: unexpected --version output: ${version}"; exit 1; }
 echo "  OK omp starts (${version})"
 
@@ -58,7 +72,7 @@ echo "  OK omp image defaults to non-root (uid ${uid})"
 # PI_CONFIG_DIR is joined under $HOME rather than treated as an absolute path,
 # so an absolute value would silently resolve outside the mount and lose all
 # state. Assert the resolved path is the mount target.
-resolved=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config path 2>&1 | tail -1)
+resolved=$(_last_line "${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config path)
 [ "${resolved}" = "${_PI_STATE_TARGET}/agent" ] || {
   echo "FAIL: omp resolved its state dir to '${resolved}', expected '${_PI_STATE_TARGET}/agent'"
   exit 1
@@ -89,7 +103,7 @@ fi
 # --- approval mode is lowered from upstream's yolo default ------------------
 # Baked as a PI_CONFIG_FILES overlay in Dockerfile.omp. yolo auto-approves the
 # exec tier — shell, browser, subagents — with no prompt.
-mode=$("${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config get tools.approvalMode 2>&1 | tail -1)
+mode=$(_last_line "${DOCKER_CMD}" run "${DOCKER_FLAGS[@]}" "${PI_IMAGE}" config get tools.approvalMode)
 [ "${mode}" = "write" ] || { echo "FAIL: approvalMode is '${mode}', expected 'write'"; exit 1; }
 echo "  OK approval mode lowered to '${mode}' (upstream default is yolo)"
 
@@ -105,9 +119,17 @@ mkdir -p "${approval_dir}/agent"
 printf 'tools:\n  approval:\n    bash: allow\n    eval: allow\n' > "${approval_dir}/agent/config.yml"
 chmod -R a+rX "${approval_dir}"
 
-merged_approval=$("${DOCKER_CMD}" run --rm \
-  --volume "${approval_dir}:${_PI_STATE_TARGET}" \
-  "${PI_IMAGE}" config get tools.approval 2>&1 | tail -1)
+# --user, like the run tasks: `config get` opens a SQLite database in the state
+# dir, so the container UID has to be able to write there. The image default
+# (65532) cannot write to a host-owned mktemp dir on Linux, and omp then exits
+# with SQLITE_CANTOPEN. --userns=keep-id for the same reason as the LSP check
+# at the end of this file.
+APPROVAL_FLAGS=("--rm" "--user" "$(id -u):$(id -g)"
+  "--volume" "${approval_dir}:${_PI_STATE_TARGET}")
+[[ "${DOCKER_CMD}" == *podman* ]] && APPROVAL_FLAGS+=("--userns=keep-id")
+
+merged_approval=$(_last_line "${DOCKER_CMD}" run "${APPROVAL_FLAGS[@]}" \
+  "${PI_IMAGE}" config get tools.approval)
 case "${merged_approval}" in
   *'"bash":"allow"'*|*'"eval":"allow"'*)
     echo "FAIL: config.yml raised a per-tool policy over the overlay: ${merged_approval}"
@@ -188,14 +210,14 @@ echo "  OK hardened overlay is readable by the runtime UID"
 # (deny/prompt carry an explicit policy, which short-circuits resolveApproval
 # before its yolo branch). Worth asserting both halves: that the dangerous
 # commands are caught, and that ordinary ones are not.
-rules=$("${DOCKER_CMD}" run --rm "${PI_IMAGE}" config get bash.patterns 2>&1 | tail -1)
+rules=$(_last_line "${DOCKER_CMD}" run --rm "${PI_IMAGE}" config get bash.patterns)
 [[ "${rules}" == \[* ]] || { echo "FAIL: bash.patterns did not load from the overlay"; exit 1; }
 
 # The omp:yolo layering: hardened.yml then yolo.yml, later file replacing the
 # array wholesale.
-yolo_rules=$("${DOCKER_CMD}" run --rm \
+yolo_rules=$(_last_line "${DOCKER_CMD}" run --rm \
   --env PI_CONFIG_FILES=/etc/omp/hardened.yml:/etc/omp/yolo.yml \
-  "${PI_IMAGE}" config get bash.patterns 2>&1 | tail -1)
+  "${PI_IMAGE}" config get bash.patterns)
 [[ "${yolo_rules}" == \[* ]] || { echo "FAIL: omp:yolo overlay did not load"; exit 1; }
 
 # No rule may be `prompt`. Under --yolo a prompt rule is the only thing that can
