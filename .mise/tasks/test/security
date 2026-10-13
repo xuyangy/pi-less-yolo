@@ -101,8 +101,23 @@ for bad_home in "$(printf '/x\nevil::0:0::/:/bin/sh')" "/x:y"; do
 done
 echo "  OK entrypoint rejects HOME containing ':' or a newline"
 
-# A well-formed HOME must still produce exactly one passwd entry.
-count=$("${DOCKER_CMD}" run --rm --user 1000:1000 pi-less-yolo:latest \
-  bash -c 'grep -c "^piuser" /etc/passwd')
-[ "${count}" = "1" ] || { echo "FAIL: expected 1 piuser passwd entry, got ${count}"; exit 1; }
-echo "  OK benign HOME still registers exactly one passwd entry"
+# A well-formed HOME must still leave exactly one passwd entry for the runtime
+# UID. Matched by UID rather than by the `piuser` name: the entrypoint appends
+# its record only when the UID has none, and Podman writes one of its own for
+# --user before the entrypoint runs. The file is read whole and counted here so
+# that a failure can print it — `grep -c` exits non-zero on a count of 0, which
+# under `set -e` ends the script before any message.
+passwd=$("${DOCKER_CMD}" run --rm --user 1000:1000 pi-less-yolo:latest \
+  bash -c 'cat /etc/passwd' 2>&1) || {
+  echo "FAIL: could not read /etc/passwd from the container:"
+  printf '%s\n' "${passwd}"
+  exit 1
+}
+entries=$(awk -F: '$3 == 1000' <<< "${passwd}")
+count=$(awk 'NF' <<< "${entries}" | wc -l | tr -d ' ')
+[ "${count}" = "1" ] || {
+  echo "FAIL: expected 1 passwd entry for UID 1000, got ${count}. /etc/passwd:"
+  printf '%s\n' "${passwd}"
+  exit 1
+}
+echo "  OK benign HOME still registers exactly one passwd entry (${entries%%:*})"
