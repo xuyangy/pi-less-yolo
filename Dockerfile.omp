@@ -94,7 +94,7 @@ RUN touch /tmp/lsp.stamp \
         # renovate: datasource=npm depName=bash-language-server
         bash-language-server@5.8.1 \
         # renovate: datasource=npm depName=yaml-language-server
-        yaml-language-server@1.25.0 \
+        yaml-language-server@2.0.0 \
         # renovate: datasource=npm depName=vscode-langservers-extracted
         vscode-langservers-extracted@4.10.0 \
         # renovate: datasource=npm depName=dockerfile-language-server-nodejs
