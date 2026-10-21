@@ -815,6 +815,20 @@ session.
 > **Accepted risk.** Audit installed packages with `pi list` and review
 > `~/.pi/agent/git/` and `~/.pi/agent/npm/` periodically.
 
+**Updating extensions.** Because the install directories are host-mounted at
+`~/.pi/agent`, updates persist the same way installs do. Run them from a shell in the
+container (`mise run pi:shell`):
+
+```bash
+pi update --extensions   # update all installed packages
+pi update <source>       # update one package, e.g. npm:@foo/bar
+pi list                  # confirm what is installed
+```
+
+> **Do not run bare `pi update` or `pi update --all` here.** With no target, `pi update`
+> updates pi itself, and `--all` does too. pi is pinned in the image, so update it from
+> the host instead — see [Upgrade pi to the latest release](#upgrade-pi-to-the-latest-release).
+
 ### Git identity
 
 If `~/.gitconfig` exists on the host it is mounted read-only at startup, so the agent can make `git commit` with your correct author identity. Opt out by setting `PI_NO_GITCONFIG=1`.
